@@ -115,11 +115,10 @@ thread_local! {
 /// Runs `f` on the launcher. Re-entrant calls (AppKit calling back while we hold it) are skipped.
 pub fn with(f: impl FnOnce(&mut Launcher)) {
     LAUNCHER.with(|cell| {
-        if let Ok(mut slot) = cell.try_borrow_mut() {
-            if let Some(l) = slot.as_mut() {
+        if let Ok(mut slot) = cell.try_borrow_mut()
+            && let Some(l) = slot.as_mut() {
                 f(l);
             }
-        }
     });
 }
 
@@ -498,7 +497,8 @@ impl Launcher {
                 let recent = self.recent.lock().map(|r| r.clone()).unwrap_or_default();
                 let take = if self.scope == Scope::Apps { MAX_ITEMS } else { 6 };
                 let boost = |i: usize| usage.boost(&apps[i].name) + recent.get(&apps[i].name).copied().unwrap_or(0);
-                items.extend(livae_core::search::rank(q, &self.names, boost).into_iter().take(take).map(Item::App));
+                let named: Vec<(&str, &str)> = apps.iter().map(|a| (a.name.as_str(), a.keywords)).collect();
+                items.extend(livae_core::search::rank_words(q, &named, boost).into_iter().take(take).map(Item::App));
                 if self.scope == Scope::All {
                     let ql = q.to_lowercase();
                     if "settings".starts_with(&ql) || "preferences".starts_with(&ql) {
@@ -596,14 +596,12 @@ impl Launcher {
                         }
                     }
                 }
-                if let Ok(mut slot) = running.lock() {
-                    if slot.as_ref().is_some_and(|(t, _)| *t == ticket) {
-                        if let Some((_, mut c)) = slot.take() {
+                if let Ok(mut slot) = running.lock()
+                    && slot.as_ref().is_some_and(|(t, _)| *t == ticket)
+                        && let Some((_, mut c)) = slot.take() {
                             let _ = c.kill();
                             let _ = c.wait();
                         }
-                    }
-                }
                 if counter.load(Ordering::SeqCst) != ticket {
                     return;
                 }
@@ -680,7 +678,13 @@ impl Launcher {
             Item::App(i) => {
                 let app = &self.apps[i];
                 self.usage.bump(&app.name);
-                NSWorkspace::sharedWorkspace().openURL(&NSURL::fileURLWithPath(&NSString::from_str(&app.path.to_string_lossy())));
+                let url = match &app.url {
+                    Some(u) => NSURL::URLWithString(&NSString::from_str(u)),
+                    None => Some(NSURL::fileURLWithPath(&NSString::from_str(&app.path.to_string_lossy()))),
+                };
+                if let Some(url) = url {
+                    NSWorkspace::sharedWorkspace().openURL(&url);
+                }
                 self.hide();
             }
             Item::File(p) => {
@@ -754,7 +758,7 @@ impl Launcher {
         self.card.root.setHidden(n == 0);
         self._list.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(WIDTH, card_h)));
 
-        let home = config::home().to_string_lossy().to_string();
+        let _home = config::home().to_string_lossy().to_string();
         let tint = ui::rgb(SECONDARY);
         let mut file_rows: Vec<(usize, f64, f64)> = Vec::new(); // (slot, name width, y)
         for slot in 0..self.rows.len() {
@@ -775,11 +779,11 @@ impl Launcher {
                 Item::Clipboard => ("Clipboard".to_string(), String::new(), None, true),
                 Item::App(i) => {
                     let p = self.apps[*i].path.to_string_lossy().to_string();
-                    (self.apps[*i].name.clone(), String::new(), Some(self.icon_for(&p)), false)
+                    (self.apps[*i].name.clone(), self.apps[*i].detail.to_string(), Some(self.icon_for(&p)), false)
                 }
                 Item::File(p) => {
                     let ps = p.to_string_lossy().to_string();
-                    let parent = p.parent().map(|d| d.to_string_lossy().replacen(&home, "~", 1)).unwrap_or_default();
+                    let parent = p.parent().map(|d| crate::ui::tilde(&d.to_string_lossy())).unwrap_or_default();
                     (p.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default(), parent, Some(self.icon_for(&ps)), false)
                 }
                 Item::Calc(v) => (v.clone(), String::new(), None, true),

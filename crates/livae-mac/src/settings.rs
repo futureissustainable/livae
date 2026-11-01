@@ -418,13 +418,12 @@ pub fn show() {
     UI.with(|u| {
         if let Some(ui) = u.borrow().as_ref() {
             ui.window.center();
-            if let Some(scroll) = &ui.scroll {
-                if let Some(doc) = scroll.documentView() {
+            if let Some(scroll) = &ui.scroll
+                && let Some(doc) = scroll.documentView() {
                     let top = doc.frame().size.height - scroll.contentSize().height;
                     scroll.contentView().scrollToPoint(NSPoint::new(0.0, top.max(0.0)));
                     scroll.reflectScrolledClipView(&scroll.contentView());
                 }
-            }
             crate::ui::present(&ui.window);
         }
     });

@@ -24,7 +24,7 @@ pub fn score(words: &[String], name_lower: &str) -> Option<u32> {
     }
     let mut score = 0;
     for w in words {
-        let at = name_lower.find(w.as_str())?;
+        let at = find(name_lower.as_bytes(), w.as_bytes())?;
         let word_start = at == 0 || !name_lower[..at].chars().next_back().is_some_and(char::is_alphanumeric);
         score += if word_start { 100 } else { 10 };
     }
@@ -32,6 +32,13 @@ pub fn score(words: &[String], name_lower: &str) -> Option<u32> {
         score += 300;
     }
     Some(score)
+}
+
+/// Where `needle` first occurs in `hay`, as `str::find` gives it; quicker for a short word in a short name.
+fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    let (&first, rest) = needle.split_first()?;
+    let last = hay.len().checked_sub(needle.len())?;
+    (0..=last).find(|&i| hay[i] == first && &hay[i + 1..i + needle.len()] == rest)
 }
 
 /// Indices of the best `limit` entries, best first. Each entry is (lower-case name, folder depth); `boost(i)` (opened
@@ -42,8 +49,14 @@ pub fn rank<'a>(query: &str, entries: impl Iterator<Item = (&'a str, u16)>, boos
         .enumerate()
         .filter_map(|(i, (name, depth))| Some((score(&words, name)? + boost(i), depth, name.len(), i)))
         .collect();
-    hits.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
-    hits.into_iter().take(limit).map(|h| h.3).collect()
+    // Only the best `limit` are sorted; the index breaks the last ties, as a stable sort of all hits would.
+    let order = |a: &(u32, u16, usize, usize), b: &(u32, u16, usize, usize)| b.0.cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)).then(a.3.cmp(&b.3));
+    if limit < hits.len() {
+        hits.select_nth_unstable_by(limit, order);
+        hits.truncate(limit);
+    }
+    hits.sort_unstable_by(order);
+    hits.into_iter().map(|h| h.3).collect()
 }
 
 #[cfg(test)]
@@ -57,6 +70,13 @@ mod tests {
         }
         for name in ["Documents", "Projects", "targets"] {
             assert!(!skip_dir(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn find_matches_str_find() {
+        for (hay, needle) in [("résumé été.pdf", "été"), ("aaab", "ab"), ("ab", "abc"), ("x", ""), ("report", "rep"), ("my_report", "port")] {
+            assert_eq!(find(hay.as_bytes(), needle.as_bytes()), if needle.is_empty() { None } else { hay.find(needle) }, "{hay} {needle}");
         }
     }
 

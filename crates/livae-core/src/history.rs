@@ -78,12 +78,14 @@ pub fn ago(now: i64, t: i64) -> String {
 pub struct History {
     pub clips: Vec<Clip>,
     pub next_id: u64,
+    /// The search keys made ready for matching, kept between keystrokes.
+    search: std::cell::RefCell<crate::search::Cache>,
 }
 
 impl History {
     pub fn new(clips: Vec<Clip>) -> Self {
         let next_id = clips.iter().map(|c| c.id).max().unwrap_or(0) + 1;
-        Self { clips, next_id }
+        Self { clips, next_id, search: Default::default() }
     }
 
     /// Re-sort texts with the current rules (an older build could file prose as code).
@@ -179,7 +181,7 @@ impl History {
             return v;
         }
         let keys: Vec<String> = self.clips.iter().map(search_key).collect();
-        crate::search::rank(q, &keys, |_| 0)
+        self.search.borrow_mut().rank(q, &keys, |_| 0)
     }
 }
 
@@ -221,8 +223,7 @@ mod tests {
 
     #[test]
     fn copies_dedupe_to_the_top_keeping_pins() {
-        let mut h = History::default();
-        h.next_id = 1;
+        let mut h = History { next_id: 1, ..History::default() };
         h.add(text("one", 1));
         h.add(text("two", 2));
         h.toggle_pin(1); // "one"

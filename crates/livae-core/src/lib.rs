@@ -1,3 +1,4 @@
+pub mod blur;
 pub mod breaks;
 pub mod calc;
 pub mod clip;

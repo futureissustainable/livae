@@ -7,7 +7,12 @@ use crate::config::support_dir;
 
 pub struct App {
     pub name: String,
+    /// The app bundle (for a System Settings pane: System Settings itself, for its icon and Show in Finder).
     pub path: PathBuf,
+    /// A System Settings pane: the URL that opens it, the kind shown beside it, and hidden search words.
+    pub url: Option<String>,
+    pub detail: &'static str,
+    pub keywords: &'static str,
 }
 
 /// Every `.app` in the usual folders and one level of subfolders (e.g. `/Applications/Adobe Photoshop 2025/`),
@@ -28,7 +33,7 @@ pub fn scan() -> Vec<App> {
             return; // hidden helpers such as .Karabiner-VirtualHIDDevice-Manager
         }
         if !out.iter().any(|a| a.name == name) {
-            out.push(App { name: name.to_string(), path });
+            out.push(App { name: name.to_string(), path, url: None, detail: "", keywords: "" });
         }
     };
     let is_app = |p: &Path| p.extension().is_some_and(|e| e == "app");
@@ -38,18 +43,24 @@ pub fn scan() -> Vec<App> {
             let path = entry.path();
             if is_app(&path) {
                 push(path, &mut out);
-            } else if path.is_dir() && !path.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.')) {
-                if let Ok(sub) = std::fs::read_dir(&path) {
+            } else if path.is_dir() && !path.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.'))
+                && let Ok(sub) = std::fs::read_dir(&path) {
                     for e in sub.flatten() {
                         if is_app(&e.path()) {
                             push(e.path(), &mut out);
                         }
                     }
                 }
-            }
         }
     }
     push(PathBuf::from("/System/Library/CoreServices/Finder.app"), &mut out);
+    // System Settings panes (livae-core's table), after the apps so an app with the same name wins.
+    let settings = PathBuf::from("/System/Applications/System Settings.app");
+    for it in livae_core::system_settings::MACOS {
+        if !out.iter().any(|a| a.name.eq_ignore_ascii_case(it.name)) {
+            out.push(App { name: it.name.to_string(), path: settings.clone(), url: Some(it.mac_url()), detail: it.detail, keywords: it.keywords });
+        }
+    }
     out.sort_by_key(|a| a.name.to_lowercase());
     out
 }

@@ -74,11 +74,10 @@ pub fn show(text: &str, at: NSPoint) {
     let after = dispatch2::DispatchTime::NOW.time(1_400_000_000);
     let _ = dispatch2::DispatchQueue::main().after(after, move || {
         HUD.with(|h| {
-            if let Some(hud) = h.borrow().as_ref() {
-                if hud.shown == ticket {
+            if let Some(hud) = h.borrow().as_ref()
+                && hud.shown == ticket {
                     hud.panel.orderOut(None);
                 }
-            }
         });
     });
 }

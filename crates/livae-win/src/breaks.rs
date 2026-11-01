@@ -12,10 +12,10 @@ use std::sync::OnceLock;
 use std::time::Instant;
 
 use livae_core::breaks::{self, Action, Break, Deck, NaiveDateTime, Quote, Rules, Scheduler};
-use windows::core::{s, w, BOOL};
+use windows::core::{s, w, Interface, BOOL};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::DirectWrite::{
-    IDWriteTextLayout, DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_LINE_METRICS, DWRITE_LINE_SPACING_METHOD_UNIFORM,
+    IDWriteTextFormat, IDWriteTextLayout, DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_LINE_METRICS, DWRITE_LINE_SPACING_METHOD_UNIFORM,
     DWRITE_PARAGRAPH_ALIGNMENT_NEAR, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_METRICS,
 };
 use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO};
@@ -81,6 +81,7 @@ struct Screen {
 }
 
 struct State {
+    labels: Labels,
     scheduler: Scheduler,
     deck: Deck,
     ticks: u64,
@@ -128,6 +129,7 @@ pub fn install() {
     }
     let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1);
     let st = State {
+        labels: Labels::default(),
         scheduler: Scheduler::new(),
         deck: Deck::new(seed),
         ticks: 0,
@@ -346,8 +348,43 @@ fn quote_layout(text: &str, column: f32) -> Option<(IDWriteTextLayout, f32)> {
 
 /// The quote's column: up to 720 wide, 48 from the screen's sides.
 fn column(w: f32) -> (f32, f32) {
-    let width = (w - 2.0 * 48.0).min(MEASURE).max(256.0);
+    let width = (w - 2.0 * 48.0).clamp(256.0, MEASURE);
     (((w - width) / 2.0).round(), width)
+}
+
+/// The small texts a break draws every frame (author, time, controls), laid out once per text, style and box
+/// instead of 30 to 60 times a second. A handful at most: the time changes once a second.
+#[derive(Default)]
+struct Labels(Vec<(String, usize, u32, u32, IDWriteTextLayout)>);
+
+impl Labels {
+    fn get(&mut self, text: &str, fmt: &IDWriteTextFormat, w: f32, h: f32) -> Option<IDWriteTextLayout> {
+        let key = (fmt.as_raw() as usize, w.to_bits(), h.to_bits());
+        if let Some(e) = self.0.iter().find(|e| e.0 == text && (e.1, e.2, e.3) == key) {
+            return Some(e.4.clone());
+        }
+        let l = gfx().layout(text, fmt, w, h)?;
+        if self.0.len() >= 16 {
+            self.0.remove(0);
+        }
+        self.0.push((text.to_string(), key.0, key.1, key.2, l.clone()));
+        Some(l)
+    }
+
+    /// As `Gfx::width`.
+    fn width(&mut self, text: &str, fmt: &IDWriteTextFormat) -> f32 {
+        let Some(l) = self.get(text, fmt, 100_000.0, 100.0) else { return 0.0 };
+        let mut m = DWRITE_TEXT_METRICS::default();
+        unsafe { l.GetMetrics(&mut m) }.map_or(0.0, |_| m.widthIncludingTrailingWhitespace)
+    }
+
+    /// As `Canvas::text`.
+    #[allow(clippy::too_many_arguments)]
+    fn draw(&mut self, c: &glass::Canvas, text: &str, fmt: &IDWriteTextFormat, x: f32, y: f32, w: f32, h: f32, color: Rgba) {
+        if let Some(l) = self.get(text, fmt, w, h) {
+            c.layout(&l, x, y, color);
+        }
+    }
 }
 
 impl State {
@@ -387,10 +424,10 @@ impl State {
     }
 
     /// Each control's hit box on a screen `w` x `h`: 44 high, its text plus 12 on each side, 8 apart, centred.
-    fn control_boxes(&self, w: f32, h: f32, long: bool) -> Vec<(Control, String, f32, f32, f32)> {
+    fn control_boxes(&mut self, w: f32, h: f32, long: bool) -> Vec<(Control, String, f32, f32, f32)> {
         let fmt = gfx().format(Font::Sans, 14.0, DWRITE_FONT_WEIGHT_MEDIUM, false, false);
         let items = self.controls();
-        let widths: Vec<f32> = items.iter().map(|(_, t)| gfx().width(t, &fmt).ceil() + 24.0).collect();
+        let widths: Vec<f32> = items.iter().map(|(_, t)| self.labels.width(t, &fmt).ceil() + 24.0).collect();
         let total = widths.iter().sum::<f32>() + 8.0 * items.len().saturating_sub(1) as f32;
         let (_, _, top) = self.rows(h, long);
         let y = top + (ROW_H - HIT) / 2.0;
@@ -407,6 +444,12 @@ impl State {
     }
 
     fn draw(&mut self, i: usize) {
+        let t = Instant::now();
+        self.draw_screen(i);
+        glass::perf("break_frame", t);
+    }
+
+    fn draw_screen(&mut self, i: usize) {
         let Some(b) = self.shown else { return };
         let Some(sc) = self.screens.get(i) else { return };
         let (w, h) = window_dips(sc.surface.hwnd, sc.scale);
@@ -419,6 +462,7 @@ impl State {
         let quiet = gfx().format(Font::Sans, 14.0, DWRITE_FONT_WEIGHT_NORMAL, false, false);
         let label = gfx().format(Font::Sans, 14.0, DWRITE_FONT_WEIGHT_MEDIUM, false, false);
         let body = gfx().format(Font::Sans, 16.0, DWRITE_FONT_WEIGHT_NORMAL, false, false);
+        let labels = &mut self.labels;
         let Screen { surface, scale, before, words, words_h } = &mut self.screens[i];
         let words_h = *words_h;
         surface.draw(*scale, |c| {
@@ -434,19 +478,19 @@ impl State {
                 c.layout(l, x, top, TEXT);
             }
             if let Some(name) = &author {
-                let tw = gfx().width(name, &body);
-                c.text(name, &body, x + ((width - tw) / 2.0).round(), top + words_h + AUTHOR_GAP, tw + 2.0, AUTHOR_H, SECONDARY);
+                let tw = labels.width(name, &body);
+                labels.draw(c, name, &body, x + ((width - tw) / 2.0).round(), top + words_h + AUTHOR_GAP, tw + 2.0, AUTHOR_H, SECONDARY);
             }
             let lx = ((c.w - LINE_W) / 2.0).round();
             c.round(lx, line_y, LINE_W, LINE_H, LINE_H / 2.0, glass::white(0.12));
             c.round(lx, line_y, LINE_W * fraction, LINE_H, LINE_H / 2.0, TEXT);
             if b.long {
                 let t = breaks::minutes_seconds(left);
-                let tw = gfx().width(&t, &quiet);
-                c.text(&t, &quiet, ((c.w - tw) / 2.0).round(), time_y, tw + 2.0, ROW_H, SECONDARY);
+                let tw = labels.width(&t, &quiet);
+                labels.draw(c, &t, &quiet, ((c.w - tw) / 2.0).round(), time_y, tw + 2.0, ROW_H, SECONDARY);
             }
             for (_, t, bx, by, bw) in &controls {
-                c.text(t, &label, bx + 12.0, *by, bw - 24.0 + 2.0, HIT, SECONDARY);
+                labels.draw(c, t, &label, bx + 12.0, *by, bw - 24.0 + 2.0, HIT, SECONDARY);
             }
             // Fading: the screen as it was, over the break, at what is left of it.
             if let (true, Some(p)) = (opacity < 1.0, before.as_ref()) {
@@ -530,10 +574,8 @@ fn show(b: Break) {
         }
     });
     // The main monitor's break takes the keyboard (Esc, and typing pauses with the break); an offscreen copy never does.
-    if !offscreen {
-        if let Some(h) = primary.or(first) {
-            glass::bring_to_front(h);
-        }
+    if !offscreen && let Some(h) = primary.or(first) {
+        glass::bring_to_front(h);
     }
     if let Some(h) = first {
         unsafe {

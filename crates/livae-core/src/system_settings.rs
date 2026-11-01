@@ -1,4 +1,4 @@
-//! Windows settings pages, Control Panel applets and system tools the launcher can open, with the words people type
+//! Settings pages (Windows and macOS), Control Panel applets and system tools the launcher can open, with the words people type
 //! for them ("wifi", "dark mode", "uninstall"). Windows only lists the Settings and Control Panel apps themselves in
 //! Start's "All apps", so without this table "display" or "bluetooth" found nothing.
 
@@ -141,6 +141,60 @@ pub const WINDOWS: &[SystemItem] = &[
     folder("Startup folder", "startup programs autostart shell startup", "shell:startup"),
 ];
 
+/// System Settings panes on macOS 13 and later (names as the Settings app shows them in English), opened through
+/// `x-apple.systempreferences:` and the pane's extension id (checked on macOS 26.7).
+pub const MACOS: &[SystemItem] = &[
+    m("Wi-Fi", "wifi wireless networks internet", "com.apple.wifi-settings-extension"),
+    m("Bluetooth", "pair devices headphones airpods", "com.apple.BluetoothSettings"),
+    m("Network", "ethernet internet dns proxy firewall", "com.apple.Network-Settings.extension"),
+    m("VPN", "virtual private network", "com.apple.NetworkExtensionSettingsUI.NESettingsUIExtension"),
+    m("Notifications", "alerts banners", "com.apple.Notifications-Settings.extension"),
+    m("Sound", "volume audio output input microphone speakers", "com.apple.Sound-Settings.extension"),
+    m("Focus", "do not disturb", "com.apple.Focus-Settings.extension"),
+    m("Screen Time", "app limits downtime", "com.apple.Screen-Time-Settings.extension"),
+    m("Appearance", "dark mode light mode accent color theme", "com.apple.Appearance-Settings.extension"),
+    m("Accessibility", "zoom voiceover contrast reduce motion", "com.apple.Accessibility-Settings.extension"),
+    m("Control Center", "menu bar icons", "com.apple.ControlCenter-Settings.extension"),
+    m("Siri", "voice assistant", "com.apple.Siri-Settings.extension"),
+    m("Spotlight", "search results", "com.apple.Spotlight-Settings.extension"),
+    m("Privacy & Security", "permissions location camera microphone full disk access accessibility filevault", "com.apple.settings.PrivacySecurity.extension"),
+    m("Desktop & Dock", "dock stage manager hot corners mission control windows", "com.apple.Desktop-Settings.extension"),
+    m("Displays", "screen resolution brightness night shift monitor refresh rate hdr scaling", "com.apple.Displays-Settings.extension"),
+    m("Wallpaper", "background desktop picture", "com.apple.Wallpaper-Settings.extension"),
+    m("Lock Screen", "screen saver display off", "com.apple.Lock-Screen-Settings.extension"),
+    m("Battery", "energy power low power mode sleep charging", "com.apple.Battery-Settings.extension"),
+    m("Touch ID & Password", "fingerprint password login", "com.apple.Touch-ID-Settings.extension"),
+    m("Users & Groups", "accounts guest user", "com.apple.Users-Groups-Settings.extension"),
+    m("Internet Accounts", "mail google exchange accounts", "com.apple.Internet-Accounts-Settings.extension"),
+    m("Apple Account", "icloud apple id", "com.apple.systempreferences.AppleIDSettings"),
+    m("Keyboard", "shortcuts input sources dictation key repeat", "com.apple.Keyboard-Settings.extension"),
+    m("Mouse", "pointer speed scroll", "com.apple.Mouse-Settings.extension"),
+    m("Trackpad", "gestures tap click scroll", "com.apple.Trackpad-Settings.extension"),
+    m("Printers & Scanners", "printer scanner print", "com.apple.Print-Scan-Settings.extension"),
+    m("About", "mac model serial version specs", "com.apple.SystemProfiler.AboutExtension"),
+    m("Software Update", "updates upgrade macos", "com.apple.Software-Update-Settings.extension"),
+    m("Storage", "disk space free up", "com.apple.settings.Storage"),
+    m("AirDrop & Handoff", "airdrop handoff continuity", "com.apple.AirDrop-Handoff-Settings.extension"),
+    m("Login Items & Extensions", "startup apps open at login background items", "com.apple.LoginItems-Settings.extension"),
+    m("Language & Region", "language region format", "com.apple.Localization-Settings.extension"),
+    m("Date & Time", "clock time zone", "com.apple.Date-Time-Settings.extension"),
+    m("Sharing", "file sharing screen sharing remote login airplay receiver computer name", "com.apple.Sharing-Settings.extension"),
+    m("Time Machine", "backup", "com.apple.Time-Machine-Settings.extension"),
+    m("Transfer or Reset", "erase factory reset", "com.apple.Transfer-Reset-Settings.extension"),
+    m("Startup Disk", "boot", "com.apple.Startup-Disk-Settings.extension"),
+];
+
+const fn m(name: &'static str, keywords: &'static str, pane: &'static str) -> SystemItem {
+    SystemItem { name, detail: "Settings", keywords, target: pane, args: None }
+}
+
+impl SystemItem {
+    /// On macOS, the URL that opens this pane in System Settings.
+    pub fn mac_url(&self) -> String {
+        format!("x-apple.systempreferences:{}", self.target)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::WINDOWS;
@@ -175,6 +229,14 @@ mod tests {
     fn hidden_words_need_the_whole_word() {
         let items: Vec<(&str, &str)> = WINDOWS.iter().map(|i| (i.name, i.keywords)).collect();
         assert!(rank_words("chrome", &items, |_| 0).is_empty());
+    }
+
+    #[test]
+    fn mac_words_find_the_pane() {
+        let items: Vec<(&str, &str)> = super::MACOS.iter().map(|i| (i.name, i.keywords)).collect();
+        for (q, want) in [("display", "Displays"), ("wifi", "Wi-Fi"), ("dark mode", "Appearance"), ("dock", "Desktop & Dock"), ("update", "Software Update")] {
+            assert_eq!(super::MACOS[rank_words(q, &items, |_| 0)[0]].name, want, "query {q:?}");
+        }
     }
 
     #[test]

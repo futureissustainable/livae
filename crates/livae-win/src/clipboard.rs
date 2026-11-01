@@ -135,7 +135,7 @@ fn read_bytes(fmt: u32, max: usize) -> Option<Vec<u8>> {
 
 fn read_text() -> Option<String> {
     let bytes = read_bytes(CF_UNICODETEXT.0 as u32, MAX_TEXT * 4 + 2)?;
-    let units: Vec<u16> = bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).take_while(|&u| u != 0).collect();
+    let units: Vec<u16> = bytes.as_chunks::<2>().0.iter().map(|&c| u16::from_le_bytes(c)).take_while(|&u| u != 0).collect();
     Some(String::from_utf16_lossy(&units))
 }
 
@@ -231,7 +231,7 @@ fn dib_from(p: &Pixels) -> Vec<u8> {
     v.extend([0u8; 16]);
     let row = (p.w * 4) as usize;
     for y in (0..p.h as usize).rev() {
-        for px in p.data[y * row..(y + 1) * row].chunks_exact(4) {
+        for px in p.data[y * row..(y + 1) * row].as_chunks::<4>().0 {
             let a = px[3] as u32;
             let over = |c: u8| ((c as u32 * a + 255 * (255 - a)) / 255) as u8;
             v.extend([over(px[0]), over(px[1]), over(px[2]), 255]);
@@ -262,10 +262,8 @@ fn app_kind(exe: &str) -> &str {
 /// Put text on the clipboard (from the launcher: a calculator answer, the field's selection). It is recorded like
 /// any copy.
 pub fn put_text(text: &str) {
-    if let Some(_open) = open() {
-        if unsafe { EmptyClipboard() }.is_ok() {
-            write_bytes(CF_UNICODETEXT.0 as u32, &utf16z(text));
-        }
+    if let Some(_open) = open() && unsafe { EmptyClipboard() }.is_ok() {
+        write_bytes(CF_UNICODETEXT.0 as u32, &utf16z(text));
     }
 }
 
@@ -1012,11 +1010,9 @@ impl Clipboard {
                 let at = glass::cursor();
                 if (at.x, at.y) != (self.mouse.x, self.mouse.y) {
                     self.mouse = at;
-                    if let Some(i) = self.slot_at(lparam) {
-                        if i != self.selected {
-                            self.selected = i;
-                            self.paint_card();
-                        }
+                    if let Some(i) = self.slot_at(lparam) && i != self.selected {
+                        self.selected = i;
+                        self.paint_card();
                     }
                 }
                 Some(LRESULT(0))

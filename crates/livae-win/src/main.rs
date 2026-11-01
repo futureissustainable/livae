@@ -12,6 +12,8 @@ mod clipboard;
 #[cfg(windows)]
 mod config;
 #[cfg(windows)]
+mod gate;
+#[cfg(windows)]
 mod glass;
 #[cfg(windows)]
 mod hotkeys;
@@ -23,6 +25,8 @@ mod launcher;
 mod shell;
 #[cfg(windows)]
 mod tray;
+#[cfg(windows)]
+mod year;
 
 #[cfg(windows)]
 fn main() {

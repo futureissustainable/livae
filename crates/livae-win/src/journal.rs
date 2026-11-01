@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicIsize, Ordering};
 
 use livae_core::field::Field;
-use livae_core::journal::{self as core, DoneCache, Entry, Mode, NaiveDate, Schedule, Tracker, DAY_COLORS, DAY_LABELS, MIN_CHARS};
+use livae_core::journal::{self as core, DoneCache, Draft, Entry, Mode, NaiveDate, Schedule, Tracker, DAY_COLORS, DAY_LABELS, MIN_CHARS};
 use livae_core::settings::Habit;
 use livae_core::tokens::{self, color::dark};
 use windows::core::{w, HSTRING, PCWSTR};
@@ -158,12 +158,8 @@ struct Ui {
     scale: f32,
     mode: Mode,
     date: NaiveDate,
-    day: Option<usize>,
-    /// The entry being edited as read from the file (or empty for a new day): its lines for habits no longer in
-    /// the settings are written back unchanged.
-    base: Entry,
-    /// Answers for the habits in the settings, by key.
-    answers: Vec<(String, Option<bool>)>,
+    /// The rating, the habit answers and the entry they edit, until Save.
+    draft: Draft,
     /// Each habit's run of Yes days up to yesterday; today's answer is added live.
     streak_base: Vec<(String, u32)>,
     editing: Option<Edit>,
@@ -174,8 +170,6 @@ struct Ui {
     notice: Notice,
     /// The hint shown, or the failed save's path and reason.
     notice_text: String,
-    /// The day the typed (unsaved) answers belong to; a snooze keeps them, a new day clears them.
-    draft_for: Option<NaiveDate>,
     saving: bool,
     showing: bool,
     focus: Focus,
@@ -279,8 +273,8 @@ fn note_font(scale: f32) -> HFONT {
     static ADDED: std::sync::Once = std::sync::Once::new();
     ADDED.call_once(|| unsafe {
         let regular = crate::glass::LIVAE_SANS[0];
-        let mut count = 0u32;
-        let _ = AddFontMemResourceEx(regular.as_ptr() as *const std::ffi::c_void, regular.len() as u32, None, &mut count);
+        let count = 0u32;
+        let _ = AddFontMemResourceEx(regular.as_ptr() as *const std::ffi::c_void, regular.len() as u32, None, &count);
     });
     for face in ["Livae Sans", "Segoe UI Variable Text"] {
         let font = make(face);
@@ -461,9 +455,7 @@ fn build() -> Ui {
         scale: 1.0,
         mode: Mode::Early,
         date: core::now().date(),
-        day: None,
-        base: Entry::default(),
-        answers: Vec::new(),
+        draft: Draft::default(),
         streak_base: Vec::new(),
         editing: None,
         name: Field::default(),
@@ -471,7 +463,6 @@ fn build() -> Ui {
         high: None,
         notice: Notice::None,
         notice_text: String::new(),
-        draft_for: None,
         saving: false,
         showing: false,
         focus: Focus::Note,
@@ -487,7 +478,7 @@ impl Ui {
     }
 
     fn answer(&self, key: &str) -> Option<bool> {
-        self.answers.iter().find(|(k, _)| k == key).and_then(|(_, v)| *v)
+        self.draft.answer(key)
     }
 
     fn note_text(&self) -> String {
@@ -495,13 +486,7 @@ impl Ui {
     }
 
     fn entry(&self) -> Entry {
-        let mut e = self.base.clone();
-        e.day = self.day;
-        e.note = self.note_text();
-        for (k, v) in &self.answers {
-            e.set_habit(k, *v);
-        }
-        e
+        self.draft.entry(self.note_text())
     }
 
     fn set_note(&mut self, text: &str) {
@@ -523,25 +508,9 @@ impl Ui {
         self.notice = Notice::None;
         self.focus = Focus::Note;
         let keys = keys(&habits());
-        if mode == Mode::Edit {
-            let e = core::parse(&file(), today).ok().flatten().unwrap_or_default();
-            self.answers = keys.iter().map(|k| (k.clone(), e.habit(k))).collect();
-            self.day = e.day;
-            self.set_note(&e.note);
-            self.base = e;
-            self.draft_for = None;
-        } else if self.draft_for != Some(today) {
-            self.base = Entry::default();
-            self.answers = keys.iter().map(|k| (k.clone(), None)).collect();
-            self.day = None;
-            self.set_note("");
-            self.draft_for = Some(today);
-        } else {
-            for k in &keys {
-                if !self.answers.iter().any(|(a, _)| a == k) {
-                    self.answers.push((k.clone(), None));
-                }
-            }
+        let saved = (mode == Mode::Edit).then(|| core::parse(&file(), today).ok().flatten().unwrap_or_default());
+        if let Some(note) = self.draft.prepare(saved, today, &keys) {
+            self.set_note(&note);
         }
         self.streak_base = core::streaks_before(&file(), &keys, today);
     }
@@ -662,7 +631,7 @@ impl Ui {
         let ring = self.panel_focused().then_some(self.focus);
         let dark_glass = config::get().glass.max(0.85) as f32;
         let date = core::date_label(self.date);
-        let (day, saving, notice, notice_text) = (self.day, self.saving, self.notice, self.notice_text.clone());
+        let (day, saving, notice, notice_text) = (self.draft.day, self.saving, self.notice, self.notice_text.clone());
         let dismiss = self.dismiss_title();
         let chips: Vec<(String, Option<bool>, u32)> = habits.iter().map(|h| (h.label.clone(), self.answer(&h.key), self.streak(h))).collect();
         let (name, caret) = (self.name.clone(), self.caret && self.panel_focused());
@@ -809,17 +778,13 @@ impl Ui {
 
     fn toggle(&mut self, index: usize) {
         let Some(h) = habits().into_iter().nth(index) else { return };
-        let next = core::toggled(self.answer(&h.key));
-        match self.answers.iter_mut().find(|(k, _)| *k == h.key) {
-            Some(slot) => slot.1 = next,
-            None => self.answers.push((h.key.clone(), next)),
-        }
+        self.draft.toggle(&h.key);
         self.after_answer();
     }
 
     fn choose(&mut self, day: usize) {
         if day < DAY_LABELS.len() {
-            self.day = Some(day);
+            self.draft.day = Some(day);
             self.after_answer();
         }
     }
@@ -855,7 +820,7 @@ impl Ui {
         if self.editing.is_some() {
             self.finish_edit(true, false);
         }
-        let mut stops = vec![Focus::Rating(self.day.unwrap_or(0)), Focus::Note];
+        let mut stops = vec![Focus::Rating(self.draft.day.unwrap_or(0)), Focus::Note];
         stops.extend((0..habits().len()).map(Focus::Habit));
         stops.push(Focus::Add);
         stops.push(Focus::Dismiss);
@@ -903,11 +868,11 @@ impl Ui {
         let Some(edit) = self.editing else { return };
         let habits = habits();
         let typed = self.name.text().to_string();
-        let others: Vec<&str> = match edit {
-            Edit::Add => habits.iter().flat_map(|h| [h.label.as_str(), h.key.as_str()]).collect(),
-            Edit::Rename(i) => habits.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, h)| h.label.as_str()).collect(),
+        let renaming = match edit {
+            Edit::Add => None,
+            Edit::Rename(i) => Some(i),
         };
-        let name = if confirm { core::habit_name(&typed, &others) } else { None };
+        let name = if confirm { core::habit_name_for(&typed, &habits, renaming) } else { None };
         if confirm && strict && name.is_none() && !typed.trim().is_empty() {
             unsafe {
                 let _ = MessageBeep(MB_OK);
@@ -921,7 +886,7 @@ impl Ui {
         match (edit, name) {
             (Edit::Add, Some(name)) => {
                 config::update(|s| s.journal.habits.push(Habit { label: name.clone(), key: name.clone() }));
-                self.answers.push((name.clone(), None));
+                self.draft.add_habit(&name);
                 self.streak_base.extend(core::streaks_before(&file(), &[name], core::now().date()));
             }
             (Edit::Rename(i), Some(name)) => config::update(|s| {
@@ -948,9 +913,7 @@ impl Ui {
                 s.journal.habits.remove(index);
             }
         });
-        if self.base.habits.iter().all(|(k, _)| *k != h.key) {
-            self.answers.retain(|(k, _)| *k != h.key);
-        }
+        self.draft.remove_habit(&h.key);
         if matches!(self.focus, Focus::Habit(_)) {
             self.focus = Focus::Add;
         }
@@ -1068,11 +1031,11 @@ impl Ui {
         self.prev = if fg.is_invalid() || app::is_ours(fg) { HWND::default() } else { fg };
         // Blur the monitor before anything of ours is on it; the panel shows its part of the same copy.
         let (bx, by, bw, bh) = if offscreen { (x, y, w, h) } else { (m.full.left, m.full.top, m.full.right - m.full.left, m.full.bottom - m.full.top) };
+        let t = std::time::Instant::now();
         let backdrop = glass::screen_copy(bx, by, bw, bh).map(|p| glass::blurred(&p, bx, by, m.scale, glass::DIM));
-        if !offscreen {
-            if let Some(b) = &backdrop {
-                self.veil = show_veil(m.full, b);
-            }
+        glass::perf("journal_backdrop", t);
+        if !offscreen && let Some(b) = &backdrop {
+            self.veil = show_veil(m.full, b);
         }
         self.panel.backdrop = backdrop;
         self.panel.cloak_until_drawn();
@@ -1402,7 +1365,7 @@ fn saved(result: Result<(), String>) {
             });
             let centre = with(|u| {
                 u.saving = false;
-                u.draft_for = None;
+                u.draft.forget();
                 let mut r = RECT::default();
                 let _ = unsafe { GetWindowRect(u.panel.hwnd, &mut r) };
                 u.dismiss();
@@ -1500,7 +1463,7 @@ pub fn dump() -> String {
         let _ = writeln!(s, "veil {}", rect(u.veil));
         let _ = writeln!(s, "scale {}", u.scale);
         let _ = writeln!(s, "date {}", core::date_label(u.date));
-        let ratings: Vec<String> = DAY_LABELS.iter().enumerate().map(|(i, l)| if u.day == Some(i) { format!("[{l}]") } else { l.to_string() }).collect();
+        let ratings: Vec<String> = DAY_LABELS.iter().enumerate().map(|(i, l)| if u.draft.day == Some(i) { format!("[{l}]") } else { l.to_string() }).collect();
         let _ = writeln!(s, "ratings {}", ratings.join(" "));
         if entry.note.is_empty() {
             let _ = writeln!(s, "note (placeholder) {PLACEHOLDER}");

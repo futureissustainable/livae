@@ -9,8 +9,6 @@
 //! front with ⌘V. ⌘P pins, ⌘⌫ deletes, Esc closes.
 
 use std::cell::RefCell;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::ptr::NonNull;
 
@@ -23,7 +21,7 @@ use objc2_app_kit::{
     NSImageScaling, NSImageView, NSPasteboard, NSPasteboardTypeString, NSTextAlignment, NSTextField, NSView, NSWorkspace,
 };
 use objc2_foundation::{ns_string, MainThreadMarker, NSData, NSDictionary, NSPoint, NSRect, NSSize, NSString, NSTimer, NSURL};
-use serde::{Deserialize, Serialize};
+use livae_core::history::{self, hash_of, Clip, History, Kind, MAX_IMAGE, MAX_TEXT};
 
 use crate::config;
 use crate::glass::Glass;
@@ -53,34 +51,6 @@ const SKIP: [&str; 5] = [
     "de.petermaurer.TransientPasteboardType",
 ];
 
-#[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-enum Kind {
-    #[default]
-    Text,
-    Code,
-    Link,
-    Color,
-    Image,
-    File,
-}
-
-#[derive(Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
-struct Clip {
-    id: u64,
-    kind: Kind,
-    /// The text; for files the path; for images empty.
-    text: String,
-    /// PNG file name in `clips/` for images.
-    image: Option<String>,
-    w: u32,
-    h: u32,
-    hash: u64,
-    app: String,
-    time: i64,
-    pinned: bool,
-}
-
 struct Row {
     highlight: Retained<NSBox>,
     thumb: Retained<NSImageView>,
@@ -98,8 +68,8 @@ pub struct Clipboard {
     card: Glass,
     field: Retained<NSTextField>,
     rows: Vec<Row>,
-    clips: Vec<Clip>,
-    /// Indices into `clips` matching the query, in display order.
+    history: History,
+    /// Indices into the history matching the query, in display order.
     shown: Vec<usize>,
     /// First shown index on screen (the list scrolls by moving this).
     first: usize,
@@ -108,7 +78,6 @@ pub struct Clipboard {
     slots: Vec<(f64, f64)>,
     last_change: isize,
     own_change: isize,
-    next_id: u64,
     thumbs: std::collections::HashMap<String, Retained<NSImage>>,
     _controller: Retained<Controller>,
     _list: Retained<List>,
@@ -121,10 +90,8 @@ thread_local! {
 
 pub fn with(f: impl FnOnce(&mut Clipboard)) {
     CLIPBOARD.with(|cell| {
-        if let Ok(mut slot) = cell.try_borrow_mut() {
-            if let Some(c) = slot.as_mut() {
-                f(c);
-            }
+        if let Ok(mut slot) = cell.try_borrow_mut() && let Some(c) = slot.as_mut() {
+            f(c);
         }
     });
 }
@@ -144,7 +111,7 @@ thread_local! {
 /// (items kept, of them pinned), for Settings.
 pub fn counts() -> (usize, usize) {
     let mut out = (0, 0);
-    with(|c| out = (c.clips.len(), c.clips.iter().filter(|x| x.pinned).count()));
+    with(|c| out = (c.history.clips.len(), c.history.clips.iter().filter(|x| x.pinned).count()));
     out
 }
 
@@ -162,13 +129,8 @@ pub fn toggle_paused() -> bool {
 
 pub fn clear_unpinned() {
     with(|c| {
-        let dir = clips_dir();
-        for clip in c.clips.iter().filter(|c| !c.pinned) {
-            if let Some(img) = &clip.image {
-                let _ = std::fs::remove_file(dir.join(img));
-            }
-        }
-        c.clips.retain(|c| c.pinned);
+        let dropped = c.history.clear_unpinned();
+        c.forget_images(dropped);
         c.save();
         c.filter();
     });
@@ -189,36 +151,6 @@ fn clips_dir() -> PathBuf {
 
 fn store_file() -> PathBuf {
     config::support_dir().join("clipboard.json")
-}
-
-fn now() -> i64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
-}
-
-fn hash_of(bytes: &[u8]) -> u64 {
-    let mut h = DefaultHasher::new();
-    bytes.hash(&mut h);
-    h.finish()
-}
-
-fn ago(t: i64) -> String {
-    let s = (now() - t).max(0);
-    match s {
-        0..=59 => "Now".into(),
-        60..=3599 => format!("{} min", s / 60),
-        3600..=86_399 => format!("{} h", s / 3600),
-        // Short forms only: the column is narrow and quiet on purpose.
-        _ => format!("{} d", s / 86_400),
-    }
-}
-
-fn classify(text: &str, app: &str) -> Kind {
-    match livae_core::clip::classify(text, app) {
-        livae_core::clip::TextKind::Link => Kind::Link,
-        livae_core::clip::TextKind::Color => Kind::Color,
-        livae_core::clip::TextKind::Code => Kind::Code,
-        livae_core::clip::TextKind::Text => Kind::Text,
-    }
 }
 
 pub fn install(mtm: MainThreadMarker) {
@@ -282,12 +214,8 @@ pub fn install(mtm: MainThreadMarker) {
     };
     panel.setContentView(Some(&root));
 
-    let mut clips = load();
-    // Re-sort texts with the current rules (an older build could file prose as code).
-    for c in clips.iter_mut().filter(|c| matches!(c.kind, Kind::Text | Kind::Code)) {
-        c.kind = classify(&c.text, &c.app);
-    }
-    let next_id = clips.iter().map(|c| c.id).max().unwrap_or(0) + 1;
+    let mut history = History::new(history::load(&store_file()));
+    history.reclassify();
     let pb = NSPasteboard::generalPasteboard();
     let mut clipboard = Clipboard {
         mtm,
@@ -296,14 +224,13 @@ pub fn install(mtm: MainThreadMarker) {
         card,
         field,
         rows,
-        clips,
+        history,
         shown: Vec::new(),
         first: 0,
         selected: 0,
         slots: Vec::new(),
         last_change: pb.changeCount(),
         own_change: -1,
-        next_id,
         thumbs: std::collections::HashMap::new(),
         _controller: controller,
         _list: list,
@@ -316,31 +243,6 @@ pub fn install(mtm: MainThreadMarker) {
     let tick = RcBlock::new(|_t: NonNull<NSTimer>| with(|c| c.poll()));
     clipboard._timer = Some(unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.4, true, &tick) });
     CLIPBOARD.with(|cell| *cell.borrow_mut() = Some(clipboard));
-}
-
-/// The saved history. A file this build cannot read is kept aside as `clipboard.json.bad`, never overwritten.
-fn load() -> Vec<Clip> {
-    let Ok(text) = std::fs::read_to_string(store_file()) else { return Vec::new() };
-    match serde_json::from_str::<Vec<serde_json::Value>>(&text) {
-        // One unreadable item (a kind from a newer build) is skipped, not the whole history.
-        Ok(items) => items.into_iter().filter_map(|v| serde_json::from_value(v).ok()).collect(),
-        Err(_) => {
-            let _ = std::fs::rename(store_file(), store_file().with_extension("json.bad"));
-            Vec::new()
-        }
-    }
-}
-
-/// Text longer than this is not recorded (a pasted log would stall every search and save).
-const MAX_TEXT: usize = 1 << 20;
-/// Images larger than this (PNG bytes) are not recorded.
-const MAX_IMAGE: usize = 24 << 20;
-
-impl Clip {
-    /// Everything but the text (which can be up to 1 MB).
-    fn clone_meta(&self) -> Clip {
-        Clip { text: String::new(), image: self.image.clone(), app: self.app.clone(), ..*self }
-    }
 }
 
 impl Clipboard {
@@ -371,7 +273,7 @@ impl Clipboard {
         }
         let app = front.and_then(|a| a.localizedName()).map(|n| n.to_string()).unwrap_or_default();
         let has = |t: &str| types.iter().any(|x| x == t);
-        let mut clip = Clip { id: 0, kind: Kind::Text, text: String::new(), image: None, w: 0, h: 0, hash: 0, app, time: now(), pinned: false };
+        let mut clip = Clip { app, time: history::now(), ..Clip::default() };
         let string = pb.stringForType(unsafe { NSPasteboardTypeString }).map(|s| s.to_string());
         // "Copy Image" in a browser also puts the image's address as text: keep the image then.
         let image_first = (has("public.png") || has("public.tiff"))
@@ -396,8 +298,8 @@ impl Clipboard {
             clip.hash = hash_of(&bytes);
             clip.w = rep.pixelsWide().max(0) as u32;
             clip.h = rep.pixelsHigh().max(0) as u32;
-            if !self.clips.iter().any(|c| c.hash == clip.hash) {
-                let name = format!("{}.png", self.next_id);
+            if !self.history.has(Kind::Image, clip.hash) {
+                let name = self.history.next_image_name();
                 if std::fs::write(clips_dir().join(&name), &bytes).is_err() {
                     return;
                 }
@@ -407,25 +309,15 @@ impl Clipboard {
             if text.trim().is_empty() || text.len() > MAX_TEXT {
                 return;
             }
-            clip.kind = classify(&text, &clip.app);
+            clip.kind = history::classify(&text, &clip.app);
             clip.hash = hash_of(text.as_bytes());
             clip.text = text;
         } else {
             return;
         }
         // The same thing copied again moves up, keeping its pin and its image file.
-        if let Some(i) = self.clips.iter().position(|c| c.hash == clip.hash && c.kind == clip.kind) {
-            let old = self.clips.remove(i);
-            clip.pinned = old.pinned;
-            clip.id = old.id;
-            if clip.image.is_none() {
-                clip.image = old.image;
-            }
-        } else {
-            clip.id = self.next_id;
-            self.next_id += 1;
-        }
-        self.clips.insert(0, clip);
+        let unused = self.history.add(clip);
+        self.forget_images(unused);
         self.prune();
         self.save();
         if self.panel.isVisible() {
@@ -435,36 +327,24 @@ impl Clipboard {
 
     /// Keep every pinned item and the newest unpinned ones up to the limit.
     fn prune(&mut self) {
-        let limit = config::get().history.max(10);
-        let mut unpinned = 0;
+        let dropped = self.history.prune(config::get().history);
+        self.forget_images(dropped);
+    }
+
+    /// Delete image files no item uses any more, and their thumbnails.
+    fn forget_images(&mut self, names: impl IntoIterator<Item = String>) {
         let dir = clips_dir();
-        let thumbs = &mut self.thumbs;
-        self.clips.retain(|c| {
-            if c.pinned {
-                return true;
-            }
-            unpinned += 1;
-            if unpinned <= limit {
-                return true;
-            }
-            if let Some(img) = &c.image {
-                let _ = std::fs::remove_file(dir.join(img));
-                thumbs.remove(img);
-            }
-            false
-        });
+        for name in names {
+            let _ = std::fs::remove_file(dir.join(&name));
+            self.thumbs.remove(&name);
+        }
     }
 
     fn save(&self) {
         if crate::app::test_mode() {
             return;
         }
-        if let Ok(json) = serde_json::to_string(&self.clips) {
-            let tmp = store_file().with_extension("json.tmp");
-            if std::fs::write(&tmp, json).is_ok() {
-                let _ = std::fs::rename(tmp, store_file());
-            }
-        }
+        let _ = history::save(&store_file(), &self.history.clips);
     }
 
     pub fn show(&mut self) {
@@ -557,7 +437,7 @@ impl Clipboard {
 
     fn toggle_pin(&mut self) {
         if let Some(&i) = self.shown.get(self.selected) {
-            self.clips[i].pinned = !self.clips[i].pinned;
+            self.history.toggle_pin(i);
             self.save();
             self.filter();
         }
@@ -565,11 +445,8 @@ impl Clipboard {
 
     fn delete_selected(&mut self) {
         if let Some(&i) = self.shown.get(self.selected) {
-            let c = self.clips.remove(i);
-            if let Some(img) = c.image {
-                let _ = std::fs::remove_file(clips_dir().join(&img));
-                self.thumbs.remove(&img);
-            }
+            let image = self.history.remove(i).and_then(|c| c.image);
+            self.forget_images(image);
             self.save();
             self.filter();
         }
@@ -582,7 +459,7 @@ impl Clipboard {
         let Some(&clip) = self.shown.get(i) else { return Vec::new() };
         self.selected = i;
         self.paint_selection();
-        let pin = if self.clips[clip].pinned { "Unpin" } else { "Pin" };
+        let pin = if self.history.clips[clip].pinned { "Unpin" } else { "Pin" };
         vec![("Paste", 1), ("Copy", 2), (pin, 3), ("Delete", 4)]
     }
 
@@ -608,24 +485,7 @@ impl Clipboard {
     }
 
     fn filter(&mut self) {
-        let q = self.field.stringValue().to_string();
-        let q = q.trim();
-        self.shown = if q.is_empty() {
-            let mut v: Vec<usize> = (0..self.clips.len()).collect();
-            v.sort_by_key(|&i| !self.clips[i].pinned); // pinned first, then newest
-            v
-        } else {
-            let keys: Vec<String> = self
-                .clips
-                .iter()
-                .map(|c| match c.kind {
-                    Kind::Image => format!("image {}", c.app),
-                    Kind::File => c.text.rsplit('/').next().unwrap_or(&c.text).to_string(),
-                    _ => c.text.chars().take(500).collect(),
-                })
-                .collect();
-            livae_core::search::rank(q, &keys, |_| 0)
-        };
+        self.shown = self.history.order(&self.field.stringValue().to_string());
         self.selected = self.selected.min(self.shown.len().saturating_sub(1));
         self.layout();
     }
@@ -655,7 +515,7 @@ impl Clipboard {
     /// Put the item back on the clipboard; with `then_paste`, also paste it into the app in front.
     fn put(&mut self, display_index: usize, then_paste: bool) {
         let Some(&i) = self.shown.get(display_index) else { return };
-        let clip = self.clips[i].clone();
+        let clip = self.history.clips[i].clone();
         let pb = NSPasteboard::generalPasteboard();
         pb.clearContents();
         match clip.kind {
@@ -682,9 +542,7 @@ impl Clipboard {
         self.own_change = pb.changeCount();
         self.last_change = self.own_change;
         // Used again: it moves to the top.
-        let mut c = self.clips.remove(i);
-        c.time = now();
-        self.clips.insert(0, c);
+        self.history.touch(i, history::now());
         self.save();
         self.hide();
         let mouse = NSEvent::mouseLocation();
@@ -743,7 +601,7 @@ impl Clipboard {
     fn layout(&mut self) {
         let visible: Vec<usize> = self.shown.iter().skip(self.first).take(SLOTS).copied().collect();
         let empty = visible.is_empty();
-        let heights: Vec<f64> = if empty { vec![44.0] } else { visible.iter().map(|&i| Self::row_height(&self.clips[i])).collect() };
+        let heights: Vec<f64> = if empty { vec![44.0] } else { visible.iter().map(|&i| Self::row_height(&self.history.clips[i])).collect() };
         let card_h = INSET + heights.iter().sum::<f64>() + INSET;
         let h = FIELD_H + GAP + card_h;
         let mut frame = self.panel.frame();
@@ -757,6 +615,7 @@ impl Clipboard {
 
         self.slots.clear();
         let mut y = card_h - INSET;
+        #[allow(clippy::needless_range_loop)] // slot indexes the rows, their heights and the items alike
         for slot in 0..SLOTS {
             let row_h = heights.get(slot).copied();
             let row = &self.rows[slot];
@@ -771,20 +630,21 @@ impl Clipboard {
             row.title.setHidden(false);
             if empty {
                 let q = self.field.stringValue().to_string();
-                let msg = if self.clips.is_empty() { "Nothing copied yet".to_string() } else { format!("No copied item matches \u{201c}{}\u{201d}", q.trim()) };
+                let msg = if self.history.clips.is_empty() { "Nothing copied yet".to_string() } else { format!("No copied item matches \u{201c}{}\u{201d}", q.trim()) };
                 row.title.setStringValue(&NSString::from_str(&msg));
                 row.title.setTextColor(Some(&ui::rgb(TERTIARY)));
                 row.title.setFont(Some(&crate::font::regular(16.0)));
                 row.title.setFrame(NSRect::new(NSPoint::new(TEXT_X, mid - 11.0), NSSize::new(WIDTH - TEXT_X - EDGE, 22.0)));
                 continue;
             }
-            let clip = &self.clips[visible[slot]];
-            let clip = Clip { text: clip.text.chars().take(400).collect(), ..clip.clone_meta() };
+            let clip = &self.history.clips[visible[slot]];
+            // Everything but the text, which can be up to 1 MB.
+            let clip = Clip { text: clip.text.chars().take(400).collect(), image: clip.image.clone(), app: clip.app.clone(), ..*clip };
             row.title.setTextColor(Some(&ui::rgb(TEXT)));
             let font = if clip.kind == Kind::Code { NSFont::monospacedSystemFontOfSize_weight(14.0, 0.0) } else { crate::font::regular(16.0) };
             row.title.setFont(Some(&font));
             row.time.setHidden(false);
-            row.time.setStringValue(&NSString::from_str(&ago(clip.time)));
+            row.time.setStringValue(&NSString::from_str(&history::ago(history::now(), clip.time)));
             row.time.setFrame(NSRect::new(NSPoint::new(WIDTH - EDGE - 56.0, mid - 9.0), NSSize::new(56.0, 18.0)));
             row.pin.setHidden(!clip.pinned);
             // The pin sits right before the time text, not before the time column.

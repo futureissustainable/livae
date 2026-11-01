@@ -124,6 +124,94 @@ pub fn habit_name(text: &str, taken: &[&str]) -> Option<String> {
     ok.then(|| t.to_string())
 }
 
+/// The name typed for a new habit (`renaming` None) or for habit `renaming`, when the file can hold it and no other
+/// habit has it. A new name must also differ from every habit's line name.
+pub fn habit_name_for(text: &str, habits: &[crate::settings::Habit], renaming: Option<usize>) -> Option<String> {
+    let taken: Vec<&str> = match renaming {
+        None => habits.iter().flat_map(|h| [h.label.as_str(), h.key.as_str()]).collect(),
+        Some(i) => habits.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, h)| h.label.as_str()).collect(),
+    };
+    habit_name(text, &taken)
+}
+
+/// What the prompt holds before Save, the same on both systems: the entry read back, the rating, the answers for
+/// the habits in the settings, and the day typed answers belong to (a snooze keeps them, a new day clears them).
+#[derive(Clone, Debug, Default)]
+pub struct Draft {
+    /// The entry being edited as read from the file (or empty for a new day): its lines for habits no longer in
+    /// the settings are written back unchanged.
+    pub base: Entry,
+    pub day: Option<usize>,
+    /// Answers by habit key.
+    pub answers: Vec<(String, Option<bool>)>,
+    kept_for: Option<NaiveDate>,
+}
+
+impl Draft {
+    /// Fill the form: `saved` (today's entry, when editing it), else the kept draft for `today` with any new
+    /// habits added, else empty. Returns the text the note must show, or None when the note keeps what it has.
+    pub fn prepare<K: AsRef<str>>(&mut self, saved: Option<Entry>, today: NaiveDate, keys: &[K]) -> Option<String> {
+        if let Some(e) = saved {
+            self.answers = keys.iter().map(|k| (k.as_ref().to_string(), e.habit(k.as_ref()))).collect();
+            self.day = e.day;
+            self.kept_for = None;
+            let note = e.note.clone();
+            self.base = e;
+            return Some(note);
+        }
+        if self.kept_for != Some(today) {
+            *self = Draft { answers: keys.iter().map(|k| (k.as_ref().to_string(), None)).collect(), kept_for: Some(today), ..Draft::default() };
+            return Some(String::new());
+        }
+        for k in keys {
+            if !self.answers.iter().any(|(a, _)| a == k.as_ref()) {
+                self.answers.push((k.as_ref().to_string(), None));
+            }
+        }
+        None
+    }
+
+    pub fn answer(&self, key: &str) -> Option<bool> {
+        self.answers.iter().find(|(k, _)| k == key).and_then(|(_, v)| *v)
+    }
+
+    /// A press on a habit: unanswered → Yes → No → Yes.
+    pub fn toggle(&mut self, key: &str) {
+        let next = toggled(self.answer(key));
+        match self.answers.iter_mut().find(|(k, _)| k == key) {
+            Some(slot) => slot.1 = next,
+            None => self.answers.push((key.to_string(), next)),
+        }
+    }
+
+    pub fn add_habit(&mut self, key: &str) {
+        self.answers.push((key.to_string(), None));
+    }
+
+    /// A habit removed from the settings: its answer goes, unless the entry being edited already holds it.
+    pub fn remove_habit(&mut self, key: &str) {
+        if self.base.habits.iter().all(|(k, _)| k != key) {
+            self.answers.retain(|(k, _)| k != key);
+        }
+    }
+
+    /// Saved: the next prompt starts empty.
+    pub fn forget(&mut self) {
+        self.kept_for = None;
+    }
+
+    /// The entry Save writes, with `note`.
+    pub fn entry(&self, note: String) -> Entry {
+        let mut e = self.base.clone();
+        e.day = self.day;
+        e.note = note;
+        for (k, v) in &self.answers {
+            e.set_habit(k, *v);
+        }
+        e
+    }
+}
+
 /// A press on a habit: unanswered → Yes → No → Yes.
 pub fn toggled(answer: Option<bool>) -> Option<bool> {
     Some(answer != Some(true))
@@ -145,10 +233,8 @@ pub struct DoneCache(Option<(std::path::PathBuf, NaiveDate, Option<std::time::Sy
 impl DoneCache {
     pub fn get(&mut self, path: &Path, day: NaiveDate) -> bool {
         let modified = fs::metadata(path).and_then(|m| m.modified()).ok();
-        if let Some((p, d, m, hit)) = &self.0 {
-            if p == path && *d == day && *m == modified {
-                return *hit;
-            }
+        if let Some((p, d, m, hit)) = &self.0 && p == path && *d == day && *m == modified {
+            return *hit;
         }
         let hit = has_entry(path, day).unwrap_or(false);
         self.0 = Some((path.to_path_buf(), day, modified, hit));
@@ -198,10 +284,8 @@ fn entries(content: &str) -> Vec<(NaiveDate, Vec<&str>)> {
             };
             open = date.is_some();
             out.extend(date.map(|d| (d, Vec::new())));
-        } else if open {
-            if let Some((_, body)) = out.last_mut() {
-                body.push(line);
-            }
+        } else if open && let Some((_, body)) = out.last_mut() {
+            body.push(line);
         }
     }
     out
@@ -481,6 +565,53 @@ impl Tracker {
 mod tests {
     use super::*;
     use chrono::NaiveDate;
+
+    #[test]
+    fn draft_keeps_answers_until_a_new_day_or_save() {
+        let (d1, d2) = (at(1, 9, 0).date(), at(2, 9, 0).date());
+        let mut d = Draft::default();
+        assert_eq!(d.prepare(None, d1, &["Read"]), Some(String::new()));
+        d.toggle("Read");
+        d.day = Some(2);
+        // A snooze and a habit added in the settings meanwhile: the answers stay, the new habit joins unanswered.
+        assert_eq!(d.prepare(None, d1, &["Read", "Walk"]), None);
+        assert_eq!((d.answer("Read"), d.answer("Walk"), d.day), (Some(true), None, Some(2)));
+        d.toggle("Read");
+        assert_eq!(d.answer("Read"), Some(false));
+        // A new day starts empty; so does the next prompt after a save.
+        assert_eq!(d.prepare(None, d2, &["Read"]), Some(String::new()));
+        assert_eq!((d.answer("Read"), d.day), (None, None));
+        d.toggle("Read");
+        d.forget();
+        d.prepare(None, d2, &["Read"]);
+        assert_eq!(d.answer("Read"), None);
+    }
+
+    #[test]
+    fn draft_edits_a_saved_day_keeping_removed_habits() {
+        let saved = Entry { day: Some(3), habits: vec![("Read".into(), Some(true)), ("Old".into(), Some(false))], note: "n".into(), ..Entry::default() };
+        let mut d = Draft::default();
+        assert_eq!(d.prepare(Some(saved), at(1, 9, 0).date(), &["Read", "Walk"]), Some("n".to_string()));
+        assert_eq!((d.answer("Read"), d.answer("Walk"), d.day), (Some(true), None, Some(3)));
+        d.add_habit("Swim");
+        d.remove_habit("Swim");
+        d.remove_habit("Read");
+        assert_eq!(d.answers.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(), ["Read", "Walk"]);
+        // The removed habit's line is written back as it was.
+        let e = d.entry("new note".into());
+        assert_eq!(e.habits, vec![("Read".into(), Some(true)), ("Old".into(), Some(false)), ("Walk".into(), None)]);
+        assert_eq!((e.day, e.note.as_str()), (Some(3), "new note"));
+    }
+
+    #[test]
+    fn habit_names_clash_with_other_habits_only() {
+        let hs = [crate::settings::Habit { label: "Reading".into(), key: "Read".into() }, crate::settings::Habit { label: "Walk".into(), key: "Walk".into() }];
+        assert_eq!(habit_name_for(" read ", &hs, None), None);
+        assert_eq!(habit_name_for("walk", &hs, Some(0)), None);
+        assert_eq!(habit_name_for("reading ", &hs, Some(0)), Some("reading".into()));
+        assert_eq!(habit_name_for("Read", &hs, Some(1)), Some("Read".into()));
+        assert_eq!(habit_name_for("Day", &hs, None), None);
+    }
 
     fn at(d: u32, h: u32, m: u32) -> NaiveDateTime {
         NaiveDate::from_ymd_opt(2026, 10, d).unwrap().and_hms_opt(h, m, 0).unwrap()

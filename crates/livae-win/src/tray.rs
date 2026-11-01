@@ -32,6 +32,7 @@ pub const BREAK_SKIP: u32 = 8;
 pub const BREAK_PAUSE_HOUR: u32 = 9;
 pub const BREAK_PAUSE_MORNING: u32 = 10;
 pub const BREAK_RESUME: u32 = 11;
+pub const YEAR: u32 = 12;
 
 thread_local! {
     static ICON: Cell<HICON> = const { Cell::new(HICON(std::ptr::null_mut())) };
@@ -126,6 +127,7 @@ pub fn menu(hwnd: HWND) -> u32 {
         let _ = AppendMenuW(m, MF_SEPARATOR, 0, PCWSTR::null());
         add(MF_STRING, JOURNAL, "Journal\u{2026}");
         add(MF_STRING | MF_GRAYED, 0, &crate::journal::status_line());
+        add(MF_STRING, YEAR, "Year\u{2026}");
         let _ = AppendMenuW(m, MF_SEPARATOR, 0, PCWSTR::null());
         add(MF_STRING | if crate::clipboard::paused() { MF_CHECKED } else { MF_UNCHECKED }, PAUSE, "Pause clipboard history");
         // Breaks: what is next, and the few things one does with it.
@@ -185,7 +187,7 @@ fn mark(ink: Rgba) -> Option<HICON> {
         let mut px = vec![0u8; (size * size * 4) as usize];
         bmp.CopyPixels(std::ptr::null(), size * 4, &mut px).ok()?;
         // Coverage becomes alpha; the colour is the ink (icons take straight alpha).
-        for p in px.chunks_exact_mut(4) {
+        for p in px.as_chunks_mut::<4>().0 {
             let a = p[3] as f32 / 255.0 * ink.3;
             p[0] = (ink.2 * 255.0) as u8;
             p[1] = (ink.1 * 255.0) as u8;

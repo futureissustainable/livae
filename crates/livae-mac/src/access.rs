@@ -82,7 +82,8 @@ pub fn caret_rect(primary_screen_height: f64) -> Option<CGRect> {
         return None;
     }
     let system = unsafe { AXUIElement::new_system_wide() };
-    unsafe { system.set_messaging_timeout(0.25) };
+    // Process-wide for Accessibility calls; the hotkey path makes up to three, so a hung app costs at most 0.3 s.
+    unsafe { system.set_messaging_timeout(0.1) };
     let focused = attribute(&system, "AXFocusedUIElement")?.downcast::<AXUIElement>().ok()?;
     let range = attribute(&focused, "AXSelectedTextRange")?;
     let mut out: *const CFType = std::ptr::null();

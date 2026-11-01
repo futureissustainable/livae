@@ -52,7 +52,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows_numerics::{Matrix3x2, Vector2};
 
 use crate::shell::{self, Pixels};
-use livae_core::tokens;
+use livae_core::{blur, tokens};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Rgba(pub f32, pub f32, pub f32, pub f32);
@@ -125,8 +125,11 @@ pub struct Gfx {
     families: HashMap<Font, Vec<u16>>,
     /// Livae Sans, loaded from the exe (never installed); the sans and display text use it when present.
     livae: Option<IDWriteFontCollection>,
-    formats: RefCell<HashMap<(Font, u32, i32, bool, bool), IDWriteTextFormat>>,
+    formats: RefCell<HashMap<FormatKey, IDWriteTextFormat>>,
 }
+
+/// A text format by font, size (bits), weight, wrapping and right alignment.
+type FormatKey = (Font, u32, i32, bool, bool);
 
 thread_local! {
     static GFX: &'static Gfx = Box::leak(Box::new(Gfx::new()));
@@ -177,10 +180,8 @@ impl Gfx {
                 for name in names {
                     let w = wide(name);
                     let (mut index, mut exists) = (0u32, windows::core::BOOL(0));
-                    if let Some(f) = &fonts {
-                        if f.FindFamilyName(PCWSTR(w.as_ptr()), &mut index, &mut exists).is_ok() && exists.as_bool() {
-                            return w;
-                        }
+                    if let Some(f) = &fonts && f.FindFamilyName(PCWSTR(w.as_ptr()), &mut index, &mut exists).is_ok() && exists.as_bool() {
+                        return w;
                     }
                 }
                 wide(names[names.len() - 1])
@@ -409,14 +410,12 @@ impl Surface {
             let own = self.backdrop.clone();
             let mut canvas = Canvas { t: &t, w: size.width as f32 / scale, h: size.height as f32 / scale, scale, hwnd: self.hwnd, bitmaps: &mut self.bitmaps, own };
             f(&mut canvas);
-            if let Err(e) = t.EndDraw(None, None) {
-                if e.code() == D2DERR_RECREATE_TARGET {
-                    // Device lost (driver update, GPU reset): rebuilt on the next paint.
-                    self.target = None;
-                    self.bitmaps.clear();
-                    let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(self.hwnd), None, false);
-                    return;
-                }
+            if let Err(e) = t.EndDraw(None, None) && e.code() == D2DERR_RECREATE_TARGET {
+                // Device lost (driver update, GPU reset): rebuilt on the next paint.
+                self.target = None;
+                self.bitmaps.clear();
+                let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(self.hwnd), None, false);
+                return;
             }
             let _ = ValidateRect(Some(self.hwnd), None);
         }
@@ -436,6 +435,7 @@ pub struct Canvas<'a> {
     own: Option<Rc<Backdrop>>,
 }
 
+#[allow(clippy::too_many_arguments)] // drawing calls take a box, a radius and a colour
 impl Canvas<'_> {
     fn brush(&self, c: Rgba) -> Option<ID2D1SolidColorBrush> {
         unsafe { self.t.CreateSolidColorBrush(&color(c), None).ok() }
@@ -578,12 +578,12 @@ impl Canvas<'_> {
                 dpiX: 96.0,
                 dpiY: 96.0,
             };
-            let size = D2D_SIZE_U { width: b.w as u32, height: b.h as u32 };
-            let bmp = unsafe { self.t.CreateBitmap(size, Some(b.px.as_ptr() as _), b.w as u32 * 4, &props).ok() };
+            let size = D2D_SIZE_U { width: b.small.w as u32, height: b.small.h as u32 };
+            let bmp = unsafe { self.t.CreateBitmap(size, Some(b.small.px.as_ptr() as _), b.small.w as u32 * 4, &props).ok() };
             self.bitmaps.insert(key.clone(), bmp);
         }
         let Some(Some(bmp)) = self.bitmaps.get(&key) else { return };
-        let k = BLUR_SCALE as f32;
+        let k = blur::SCALE as f32;
         let (sx, sy) = ((at.x - b.x) as f32 / k, (at.y - b.y) as f32 / k);
         let src = rect(sx, sy, self.w * self.scale / k, self.h * self.scale / k);
         unsafe { self.t.DrawBitmap(bmp, Some(&rect(0.0, 0.0, self.w, self.h)), 1.0, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, Some(&src)) };
@@ -638,114 +638,48 @@ impl Canvas<'_> {
 
 /// The panel glass: Windows 11 no longer draws its light blur-behind (tested 01.11.2026, the window came out
 /// black), and acrylic lifts black to grey and blurs every shape away. So a panel blurs what is behind it once,
-/// as it opens: a GDI copy of the screen, shrunk BLUR_SCALE times, box-blurred three times (close to a Gaussian of
-/// BLUR_DIP), dimmed to DIM so white text stays readable over white. Black stays black, as on the Mac.
+/// as it opens: a GDI copy of the screen, shrunk, blurred and dimmed to DIM by `livae_core::blur` so white text
+/// stays readable over white. Black stays black, as on the Mac.
 pub struct Backdrop {
     id: u64,
-    /// Top-left of the captured area in screen pixels, and the shrunk size.
+    /// Top-left of the captured area in screen pixels.
     x: i32,
     y: i32,
-    w: usize,
-    h: usize,
-    px: Vec<u8>,
+    small: blur::Small,
 }
 
-const BLUR_SCALE: i32 = 4;
-const BLUR_DIP: f32 = 18.0;
 pub const DIM: f32 = 0.35;
 
 fn capture_backdrop(x: i32, y: i32, w: i32, h: i32, scale: f32) -> Option<Rc<Backdrop>> {
-    screen_copy(x, y, w, h).map(|full| blurred(&full, x, y, scale, DIM))
+    let t = std::time::Instant::now();
+    let b = screen_copy(x, y, w, h).map(|full| blurred(&full, x, y, scale, DIM));
+    perf("panel_backdrop", t);
+    b
 }
 
-/// `full`, a screen copy taken at (x, y), shrunk BLUR_SCALE times, blurred and dimmed to `dim` (1 keeps it as bright).
-pub fn blurred(full: &Pixels, x: i32, y: i32, scale: f32, dim: f32) -> Rc<Backdrop> {
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-    let (w, h) = (full.w as usize, full.h as usize);
-    let k = BLUR_SCALE as usize;
-    let (sw, sh) = (w.div_ceil(k), h.div_ceil(k));
-    // Shrink: the average of each k x k block.
-    let mut small = vec![[0f32; 3]; sw * sh];
-    for sy in 0..sh {
-        for sx in 0..sw {
-            let (mut acc, mut n) = ([0f32; 3], 0f32);
-            for yy in sy * k..((sy + 1) * k).min(h) {
-                for xx in sx * k..((sx + 1) * k).min(w) {
-                    let i = (yy * w + xx) * 4;
-                    for c in 0..3 {
-                        acc[c] += full.data[i + c] as f32;
-                    }
-                    n += 1.0;
-                }
-            }
-            small[sy * sw + sx] = acc.map(|v| v / n.max(1.0));
+/// A `--test` copy with `LIVAE_PERF=<file>`: adds "label microseconds" to that file, for timing checks.
+pub fn perf(label: &str, since: std::time::Instant) {
+    let us = since.elapsed().as_micros();
+    if let Some(path) = std::env::var_os("LIVAE_PERF").filter(|_| crate::config::test_mode()) {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(f, "{label} {us}");
         }
     }
-    // Three box blurs approach a Gaussian; sigma of three passes of radius r is about 1.12 r.
-    let r = ((BLUR_DIP * scale / BLUR_SCALE as f32) / 1.12).round().max(1.0) as usize;
-    for _ in 0..3 {
-        small = box_blur(&small, sw, sh, r, true);
-        small = box_blur(&small, sw, sh, r, false);
-    }
-    let px = small.iter().flat_map(|p| [(p[0] * dim) as u8, (p[1] * dim) as u8, (p[2] * dim) as u8, 255]).collect();
-    Rc::new(Backdrop { id: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed), x, y, w: sw, h: sh, px })
+}
+
+/// `full`, a screen copy taken at (x, y), blurred and dimmed to `dim` (1 keeps it as bright).
+pub fn blurred(full: &Pixels, x: i32, y: i32, scale: f32, dim: f32) -> Rc<Backdrop> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let small = blur::blur(&full.data, full.w as usize, full.h as usize, scale, dim);
+    Rc::new(Backdrop { id: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed), x, y, small })
 }
 
 impl Backdrop {
     /// The blur back at `w` x `h` pixels (bilinear), under `wash` black, as BGRA with alpha 255.
     pub fn full_size(&self, w: usize, h: usize, wash: f32) -> Vec<u8> {
-        let mut out = vec![0u8; w * h * 4];
-        if self.w == 0 || self.h == 0 {
-            return out;
-        }
-        let keep = 1.0 - wash.clamp(0.0, 1.0);
-        let (fx, fy) = (self.w as f32 / w.max(1) as f32, self.h as f32 / h.max(1) as f32);
-        for y in 0..h {
-            let sy = ((y as f32 + 0.5) * fy - 0.5).clamp(0.0, (self.h - 1) as f32);
-            let (y0, ty) = (sy as usize, sy.fract());
-            let y1 = (y0 + 1).min(self.h - 1);
-            for x in 0..w {
-                let sx = ((x as f32 + 0.5) * fx - 0.5).clamp(0.0, (self.w - 1) as f32);
-                let (x0, tx) = (sx as usize, sx.fract());
-                let x1 = (x0 + 1).min(self.w - 1);
-                let at = |xx: usize, yy: usize, c: usize| self.px[(yy * self.w + xx) * 4 + c] as f32;
-                let o = (y * w + x) * 4;
-                for c in 0..3 {
-                    let top = at(x0, y0, c) * (1.0 - tx) + at(x1, y0, c) * tx;
-                    let bottom = at(x0, y1, c) * (1.0 - tx) + at(x1, y1, c) * tx;
-                    out[o + c] = ((top * (1.0 - ty) + bottom * ty) * keep) as u8;
-                }
-                out[o + 3] = 255;
-            }
-        }
-        out
+        self.small.full_size(w, h, wash)
     }
-}
-
-/// One pass of a box blur along rows (or columns), edges clamped.
-fn box_blur(src: &[[f32; 3]], w: usize, h: usize, r: usize, rows: bool) -> Vec<[f32; 3]> {
-    let (len, lines) = if rows { (w, h) } else { (h, w) };
-    let at = |line: usize, i: usize| if rows { line * w + i } else { i * w + line };
-    let mut out = vec![[0f32; 3]; src.len()];
-    let span = (2 * r + 1) as f32;
-    for line in 0..lines {
-        let mut acc = [0f32; 3];
-        for i in 0..=2 * r {
-            let p = src[at(line, i.saturating_sub(r).min(len - 1))];
-            for c in 0..3 {
-                acc[c] += p[c];
-            }
-        }
-        for i in 0..len {
-            out[at(line, i)] = acc.map(|v| v / span);
-            let add = src[at(line, (i + r + 1).min(len - 1))];
-            let sub = src[at(line, i.saturating_sub(r))];
-            for c in 0..3 {
-                acc[c] += add[c] - sub[c];
-            }
-        }
-    }
-    out
 }
 
 /// The screen in a rectangle as an opaque picture (BGRA, alpha 255), or None when the copy fails.
@@ -1098,10 +1032,8 @@ fn draw_hud(hud: &mut Hud) {
 
 fn hud_paint() {
     HUD_STATE.with(|cell| {
-        if let Ok(mut slot) = cell.try_borrow_mut() {
-            if let Some(h) = slot.as_mut() {
-                draw_hud(h);
-            }
+        if let Ok(mut slot) = cell.try_borrow_mut() && let Some(h) = slot.as_mut() {
+            draw_hud(h);
         }
     });
 }

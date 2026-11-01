@@ -267,8 +267,8 @@ fn wic() -> Option<IWICImagingFactory> {
 
 /// Some apps put 32-bit images on the clipboard with every alpha byte zero: treat those as opaque.
 fn fix_alpha(data: &mut [u8]) {
-    if data.chunks_exact(4).all(|p| p[3] == 0) {
-        data.chunks_exact_mut(4).for_each(|p| p[3] = 255);
+    if data.as_chunks::<4>().0.iter().all(|p| p[3] == 0) {
+        data.as_chunks_mut::<4>().0.iter_mut().for_each(|p| p[3] = 255);
     }
 }
 

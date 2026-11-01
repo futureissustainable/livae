@@ -1,5 +1,7 @@
 //! Fuzzy ranking shared by the launcher and the clipboard history on both systems.
 
+use std::collections::HashMap;
+
 use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 
@@ -10,21 +12,81 @@ pub fn rank<S: AsRef<str>>(query: &str, items: &[S], boost: impl Fn(usize) -> u3
     if query.is_empty() {
         return (0..items.len()).collect();
     }
+    let (ql, pattern) = (query.to_lowercase(), fuzzy(query));
     let mut matcher = Matcher::new(Config::DEFAULT);
-    let pattern = Pattern::new(query, CaseMatching::Ignore, Normalization::Smart, AtomKind::Fuzzy);
     let mut buf = Vec::new();
-    let mut hits: Vec<(u32, usize)> = items
-        .iter()
-        .enumerate()
-        .filter_map(|(i, s)| {
+    let hits = items.iter().enumerate().filter_map(|(i, s)| {
+        let text = s.as_ref();
+        let score = pattern.score(Utf32Str::new(text, &mut buf), &mut matcher)?;
+        Some((score + prefix(&text.to_lowercase(), &ql) + boost(i), i))
+    });
+    best(hits.collect(), |i| items[i].as_ref().len())
+}
+
+/// `rank` for a list searched again on every keystroke (the clipboard history): each text is made ready for matching
+/// once and kept while the list still holds it. Same results as `rank`.
+#[derive(Debug, Default)]
+pub struct Cache {
+    ready: HashMap<String, Ready>,
+    round: u64,
+}
+
+#[derive(Debug)]
+struct Ready {
+    /// The text as the matcher sees it; None when that is its own bytes.
+    chars: Option<Vec<char>>,
+    lower: String,
+    round: u64,
+}
+
+impl Cache {
+    pub fn rank<S: AsRef<str>>(&mut self, query: &str, items: &[S], boost: impl Fn(usize) -> u32) -> Vec<usize> {
+        let query = query.trim();
+        if query.is_empty() {
+            return (0..items.len()).collect();
+        }
+        let (ql, pattern) = (query.to_lowercase(), fuzzy(query));
+        let mut matcher = Matcher::new(Config::DEFAULT);
+        self.round += 1;
+        let mut hits = Vec::new();
+        for (i, s) in items.iter().enumerate() {
             let text = s.as_ref();
-            let score = pattern.score(Utf32Str::new(text, &mut buf), &mut matcher)?;
-            // A name that starts with the query reads as the obvious pick.
-            let prefix = if text.to_lowercase().starts_with(&query.to_lowercase()) { 200 } else { 0 };
-            Some((score + prefix + boost(i), i))
-        })
-        .collect();
-    hits.sort_by(|a, b| b.0.cmp(&a.0).then(items[a.1].as_ref().len().cmp(&items[b.1].as_ref().len())));
+            if !self.ready.contains_key(text) {
+                self.ready.insert(text.to_string(), Ready::new(text));
+            }
+            let Some(r) = self.ready.get_mut(text) else { continue };
+            r.round = self.round;
+            // As Utf32Str::new: its own bytes when every grapheme starts with an ASCII character.
+            let haystack = r.chars.as_deref().map_or(Utf32Str::Ascii(text.as_bytes()), Utf32Str::Unicode);
+            if let Some(score) = pattern.score(haystack, &mut matcher) {
+                hits.push((score + prefix(&r.lower, &ql) + boost(i), i));
+            }
+        }
+        let round = self.round;
+        self.ready.retain(|_, r| r.round == round);
+        best(hits, |i| items[i].as_ref().len())
+    }
+}
+
+impl Ready {
+    fn new(text: &str) -> Ready {
+        let chars = (!text.is_ascii()).then(|| nucleo_matcher::chars::graphemes(text).collect::<Vec<char>>()).filter(|c| !c.iter().all(char::is_ascii));
+        Ready { chars, lower: text.to_lowercase(), round: 0 }
+    }
+}
+
+fn fuzzy(query: &str) -> Pattern {
+    Pattern::new(query, CaseMatching::Ignore, Normalization::Smart, AtomKind::Fuzzy)
+}
+
+/// A name that starts with the query reads as the obvious pick.
+fn prefix(lower: &str, query_lower: &str) -> u32 {
+    if lower.starts_with(query_lower) { 200 } else { 0 }
+}
+
+/// Indices by score, best first; ties go to the shorter text.
+fn best(mut hits: Vec<(u32, usize)>, len: impl Fn(usize) -> usize) -> Vec<usize> {
+    hits.sort_by(|a, b| b.0.cmp(&a.0).then(len(a.1).cmp(&len(b.1))));
     hits.into_iter().map(|(_, i)| i).collect()
 }
 
@@ -38,11 +100,11 @@ pub fn rank_words<N: AsRef<str>, W: AsRef<str>>(query: &str, items: &[(N, W)], b
     }
     let ql = query.to_lowercase();
     let mut matcher = Matcher::new(Config::DEFAULT);
-    let pattern = Pattern::new(query, CaseMatching::Ignore, Normalization::Smart, AtomKind::Fuzzy);
+    let pattern = fuzzy(query);
     // The hidden words must contain every typed word as written: fuzzy matching there let "chrome" find Display.
     let exact = Pattern::new(query, CaseMatching::Ignore, Normalization::Smart, AtomKind::Substring);
     let mut buf = Vec::new();
-    let mut hits: Vec<(u32, usize)> = items
+    let hits: Vec<(u32, usize)> = items
         .iter()
         .enumerate()
         .filter_map(|(i, (name, words))| {
@@ -59,13 +121,25 @@ pub fn rank_words<N: AsRef<str>, W: AsRef<str>>(query: &str, items: &[(N, W)], b
             Some((score + boost(i), i))
         })
         .collect();
-    hits.sort_by(|a, b| b.0.cmp(&a.0).then(items[a.1].0.as_ref().len().cmp(&items[b.1].0.as_ref().len())));
-    hits.into_iter().map(|(_, i)| i).collect()
+    best(hits, |i| items[i].0.as_ref().len())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::rank;
+    use super::{rank, Cache};
+
+    #[test]
+    fn cache_ranks_as_rank_does() {
+        let items = ["Résumé été", "resume", "e\u{301}te", "Project notes", "notes project", "ünïcode Σ", "report.pdf"];
+        let mut cache = Cache::default();
+        for q in ["r", "re", "res", "e", "été", "pro not", "Σ", "zzz", " "] {
+            for _ in 0..2 {
+                assert_eq!(cache.rank(q, &items, |i| i as u32), rank(q, &items, |i| i as u32), "{q}");
+            }
+        }
+        cache.rank("r", &items[..2], |_| 0);
+        assert_eq!(cache.ready.len(), 2);
+    }
 
     #[test]
     fn prefix_and_fuzzy_matches_rank_first() {

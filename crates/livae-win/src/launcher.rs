@@ -839,7 +839,7 @@ impl Launcher {
             _ if cmd && vk.0 == b'A' as u16 => self.field.select_all(),
             _ if cmd && vk.0 == b'C' as u16 => {
                 if let Some(t) = self.field.selected_text() {
-                    crate::clipboard::put_text(&t.to_string());
+                    crate::clipboard::put_text(t);
                 }
             }
             _ if cmd && vk.0 == b'X' as u16 => {
@@ -916,12 +916,11 @@ impl Launcher {
                 let at = glass::cursor();
                 if (at.x, at.y) != (self.mouse.x, self.mouse.y) {
                     self.mouse = at;
-                    if let Some(i) = self.slot_at(lparam) {
-                        if i != self.selected && !matches!(self.items[i], Item::Empty | Item::Indexing) {
+                    if let Some(i) = self.slot_at(lparam)
+                        && i != self.selected && !matches!(self.items[i], Item::Empty | Item::Indexing) {
                             self.selected = i;
                             self.paint_card();
                         }
-                    }
                 }
                 Some(LRESULT(0))
             }

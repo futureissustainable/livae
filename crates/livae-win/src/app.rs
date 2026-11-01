@@ -7,7 +7,7 @@
 //! [file]` the journal on `journal-test.md` in the data folder (seeded from `file`). `--test` makes a throwaway copy
 //! (see config.rs), `--offscreen` keeps its windows off every screen, `--dump <file>` writes what the open panel
 //! shows and quits. `--install-startup` / `--remove-startup` add or remove the Startup-folder shortcut; `--quit`
-//! closes Livae.
+//! closes Livae. `--year` opens the year board; `--streak` chooses its habit tab and `--hover YYYY-MM-DD` its card.
 
 use std::io::Write;
 use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering};
@@ -27,11 +27,11 @@ use windows::Win32::System::Threading::{CreateMutexW, GetCurrentProcessId};
 use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-use crate::{breaks, clipboard, config, glass, hotkeys, journal, launcher, shell, tray};
+use crate::{breaks, clipboard, config, gate, glass, hotkeys, journal, launcher, shell, tray, year};
 
 const WM_RUN: u32 = WM_APP + 2;
 const WM_HOTKEY_PRESSED: u32 = WM_APP + 3;
-/// Sent by a second start: wparam 1 = launcher, 2 = clipboard.
+/// Sent by a second start: wparam 1 = launcher, 2 = clipboard, 3 = year.
 const WM_FORWARD: u32 = WM_APP + 4;
 
 const T_RETRY: usize = 1;
@@ -114,11 +114,10 @@ fn say(msg: &str) {
         return;
     }
     unsafe {
-        if AttachConsole(ATTACH_PARENT_PROCESS).is_ok() {
-            if let Ok(mut con) = std::fs::OpenOptions::new().write(true).open("CONOUT$") {
+        if AttachConsole(ATTACH_PARENT_PROCESS).is_ok()
+            && let Ok(mut con) = std::fs::OpenOptions::new().write(true).open("CONOUT$") {
                 let _ = writeln!(con, "{msg}");
             }
-        }
     }
 }
 
@@ -132,6 +131,11 @@ fn find_running() -> Option<HWND> {
 }
 
 pub fn run() {
+    if gate::is_host_call() {
+        gate::serve();
+        return;
+    }
+    gate::install_manifest();
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
@@ -168,7 +172,7 @@ pub fn run() {
             GetLastError() == ERROR_ALREADY_EXISTS
         };
         if exists {
-            let which = if config::flag("--clipboard") { 2 } else if config::flag("--show") { 1 } else { 0 };
+            let which = if config::flag("--year") { 3 } else if config::flag("--clipboard") { 2 } else if config::flag("--show") { 1 } else { 0 };
             if let (Some(h), true) = (find_running(), which > 0) {
                 unsafe {
                     let _ = AllowSetForegroundWindow(windows::Win32::UI::WindowsAndMessaging::ASFW_ANY);
@@ -235,6 +239,9 @@ pub fn run() {
     if config::flag("--journal") {
         journal::show_test(config::value("--journal").filter(|v| !v.starts_with("--")).map(std::path::PathBuf::from));
     }
+    if config::flag("--year") {
+        year::show_test();
+    }
     if config::flag("--dump") {
         let _ = START.set(Instant::now());
         unsafe {
@@ -258,7 +265,9 @@ static START: OnceLock<Instant> = OnceLock::new();
 fn dump_tick() {
     let clip = config::flag("--clipboard");
     let waited = START.get().map_or(0, |s| s.elapsed().as_secs());
-    let mut text = if config::flag("--break") {
+    let mut text = if config::flag("--year") {
+        year::dump()
+    } else if config::flag("--break") {
         if !breaks::settled() && waited < 5 {
             return;
         }
@@ -271,7 +280,7 @@ fn dump_tick() {
         }
         if clip { clipboard::dump() } else { launcher::dump() }
     };
-    if !clip && !config::flag("--break") && !config::flag("--journal") && !launcher::ready() {
+    if !clip && !config::flag("--year") && !config::flag("--break") && !config::flag("--journal") && !launcher::ready() {
         text.push_str("# not ready after 15 s\n");
     }
     match config::value("--dump").filter(|v| !v.starts_with("--")) {
@@ -308,6 +317,7 @@ fn command(cmd: u32) {
         }
         tray::SETTINGS => open_settings(),
         tray::JOURNAL => journal::show(),
+        tray::YEAR => year::show(),
         tray::BREAK_NOW => breaks::start_now(),
         tray::BREAK_SKIP => breaks::skip_to_next_break(),
         tray::BREAK_PAUSE_HOUR => breaks::pause_for(60),
@@ -376,6 +386,7 @@ extern "system" fn main_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARA
                 match wparam.0 {
                     1 => launcher::show(),
                     2 => clipboard::show(),
+                    3 => year::show(),
                     _ => {}
                 }
                 LRESULT(0)
@@ -408,11 +419,10 @@ extern "system" fn main_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARA
                     }
                     PBT_POWERSETTINGCHANGE => {
                         // The console display: 0 off, 1 on, 2 dimmed.
-                        if let Some(p) = (lparam.0 as *const POWERBROADCAST_SETTING).as_ref() {
-                            if p.PowerSetting == GUID_CONSOLE_DISPLAY_STATE && p.DataLength >= 1 {
+                        if let Some(p) = (lparam.0 as *const POWERBROADCAST_SETTING).as_ref()
+                            && p.PowerSetting == GUID_CONSOLE_DISPLAY_STATE && p.DataLength >= 1 {
                                 breaks::set_displays_off(p.Data[0] == 0);
                             }
-                        }
                     }
                     _ => {}
                 }

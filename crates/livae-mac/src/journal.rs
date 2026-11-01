@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 
 use block2::RcBlock;
-use livae_core::journal::{self as core, Entry, Mode, NaiveDate, NaiveDateTime, Schedule, Tracker, DAY_COLORS, DAY_LABELS, MIN_CHARS};
+use livae_core::journal::{self as core, Draft, Entry, Mode, NaiveDate, NaiveDateTime, Schedule, Tracker, DAY_COLORS, DAY_LABELS, MIN_CHARS};
 use livae_core::tokens::{self, color::dark};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
@@ -132,18 +132,12 @@ struct Ui {
     dismiss: Retained<Pill>,
     save: Retained<Pill>,
     mode: Cell<Mode>,
-    day: Cell<Option<usize>>,
-    /// The entry being edited as read from the file (or empty for a new day): its lines for habits no longer in
-    /// Settings are written back unchanged.
-    base: RefCell<Entry>,
-    /// Answers for the habits in Settings, by key.
-    answers: RefCell<Vec<(String, Option<bool>)>>,
+    /// The rating, the habit answers and the entry they edit, until Save.
+    draft: RefCell<Draft>,
     /// Each habit's run of Yes days up to yesterday; today's answer is added live.
     streak_base: RefCell<Vec<(String, u32)>>,
     editing: Cell<Option<Edit>>,
     notice: Cell<Notice>,
-    /// The day the typed (unsaved) answers belong to; a snooze keeps them, a new day clears them.
-    draft_for: Cell<Option<NaiveDate>>,
     saving: Cell<bool>,
     showing: Cell<bool>,
     /// Changes on every open and close, so late callbacks can tell they are stale.
@@ -212,7 +206,7 @@ define_class!(
             let Some(tag) = sender.and_then(|s| s.downcast_ref::<NSControl>()).map(|c| c.tag()) else { return };
             with_ui(|u| {
                 if (0..DAY_LABELS.len() as isize).contains(&tag) {
-                    u.day.set(Some(tag as usize));
+                    u.draft.borrow_mut().day = Some(tag as usize);
                 }
                 u.refresh();
             });
@@ -686,17 +680,11 @@ enum Key {
 
 impl Ui {
     fn answer(&self, key: &str) -> Option<bool> {
-        self.answers.borrow().iter().find(|(k, _)| k == key).and_then(|(_, v)| *v)
+        self.draft.borrow().answer(key)
     }
 
     fn entry(&self) -> Entry {
-        let mut e = self.base.borrow().clone();
-        e.day = self.day.get();
-        e.note = self.note.string().to_string();
-        for (k, v) in self.answers.borrow().iter() {
-            e.set_habit(k, *v);
-        }
-        e
+        self.draft.borrow().entry(self.note.string().to_string())
     }
 
     fn set_note(&self, text: &str) {
@@ -717,26 +705,10 @@ impl Ui {
         self.editing.set(None);
         self.notice.set(Notice::None);
         let keys = keys(&habits());
-        if mode == Mode::Edit {
-            let e = core::parse(&file(), today).ok().flatten().unwrap_or_default();
-            *self.answers.borrow_mut() = keys.iter().map(|k| (k.clone(), e.habit(k))).collect();
-            self.day.set(e.day);
-            self.set_note(&e.note);
-            *self.base.borrow_mut() = e;
-            self.draft_for.set(None);
-        } else if self.draft_for.get() != Some(today) {
-            *self.base.borrow_mut() = Entry::default();
-            *self.answers.borrow_mut() = keys.iter().map(|k| (k.clone(), None)).collect();
-            self.day.set(None);
-            self.set_note("");
-            self.draft_for.set(Some(today));
-        } else {
-            let mut answers = self.answers.borrow_mut();
-            for k in &keys {
-                if !answers.iter().any(|(a, _)| a == k) {
-                    answers.push((k.clone(), None));
-                }
-            }
+        let saved = (mode == Mode::Edit).then(|| core::parse(&file(), today).ok().flatten().unwrap_or_default());
+        let note = self.draft.borrow_mut().prepare(saved, today, &keys);
+        if let Some(note) = note {
+            self.set_note(&note);
         }
         *self.streak_base.borrow_mut() = core::streaks_before(&file(), &keys, today);
         self.date.setStringValue(&NSString::from_str(&core::date_label(today)));
@@ -771,7 +743,7 @@ impl Ui {
         let secondary = ui::rgb(SECONDARY);
         let rest = ui::white(0.06);
         for (i, p) in self.days.iter().enumerate() {
-            let on = self.day.get() == Some(i);
+            let on = self.draft.borrow().day == Some(i);
             if on {
                 p.paint(DAY_LABELS[i], Some(&day_color(i)), None, &text);
             } else {
@@ -840,14 +812,7 @@ impl Ui {
 
     fn toggle(&self, index: usize) {
         let Some(h) = habits().into_iter().nth(index) else { return };
-        let next = core::toggled(self.answer(&h.key));
-        {
-            let mut answers = self.answers.borrow_mut();
-            match answers.iter_mut().find(|(k, _)| *k == h.key) {
-                Some(slot) => slot.1 = next,
-                None => answers.push((h.key.clone(), next)),
-            }
-        }
+        self.draft.borrow_mut().toggle(&h.key);
         self.refresh_chips();
         self.refresh_state();
     }
@@ -873,11 +838,11 @@ impl Ui {
         let Some(edit) = self.editing.get() else { return };
         let habits = habits();
         let typed = self.field.stringValue().to_string();
-        let others: Vec<&str> = match edit {
-            Edit::Add => habits.iter().flat_map(|h| [h.label.as_str(), h.key.as_str()]).collect(),
-            Edit::Rename(i) => habits.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, h)| h.label.as_str()).collect(),
+        let renaming = match edit {
+            Edit::Add => None,
+            Edit::Rename(i) => Some(i),
         };
-        let name = if confirm { core::habit_name(&typed, &others) } else { None };
+        let name = if confirm { core::habit_name_for(&typed, &habits, renaming) } else { None };
         if confirm && strict && name.is_none() && !typed.trim().is_empty() {
             NSBeep();
             return;
@@ -886,7 +851,7 @@ impl Ui {
         match (edit, name) {
             (Edit::Add, Some(name)) => {
                 config::update(|s| s.journal.habits.push(Habit { label: name.clone(), key: name.clone() }));
-                self.answers.borrow_mut().push((name.clone(), None));
+                self.draft.borrow_mut().add_habit(&name);
                 let today = core::now().date();
                 self.streak_base.borrow_mut().extend(core::streaks_before(&file(), &[name], today));
                 self.rebuild_chips();
@@ -913,9 +878,7 @@ impl Ui {
                 s.journal.habits.remove(index);
             }
         });
-        if self.base.borrow().habits.iter().all(|(k, _)| *k != h.key) {
-            self.answers.borrow_mut().retain(|(k, _)| *k != h.key);
-        }
+        self.draft.borrow_mut().remove_habit(&h.key);
         self.rebuild_chips();
         self.refresh();
     }
@@ -983,10 +946,8 @@ impl Ui {
                 Item::Editor => self.editor.setFrame(rect(x, y, EDIT_W, CHIP_H)),
             }
         }
-        if let Some(Edit::Rename(i)) = editing {
-            if let Some(c) = chips.get(i) {
-                c.setHidden(true);
-            }
+        if let Some(Edit::Rename(i)) = editing && let Some(c) = chips.get(i) {
+            c.setHidden(true);
         }
 
         // Right: dismiss, counter, Save, centred on the footer.
@@ -1073,7 +1034,7 @@ impl Ui {
     /// it), the note, each habit, add, dismiss, Save.
     fn tab(&self, back: bool) {
         let chips = self.chips.borrow();
-        let rating: &NSView = &self.days[self.day.get().unwrap_or(0)];
+        let rating: &NSView = &self.days[self.draft.borrow().day.unwrap_or(0)];
         let mut stops: Vec<&NSView> = vec![rating, &self.note];
         stops.extend(chips.iter().filter(|c| !c.isHidden()).map(|c| -> &NSView { c }));
         if !self.add.isHidden() {
@@ -1353,13 +1314,10 @@ fn build(mtm: MainThreadMarker) -> Ui {
         dismiss,
         save,
         mode: Cell::new(Mode::Early),
-        day: Cell::new(None),
-        base: RefCell::new(Entry::default()),
-        answers: RefCell::new(Vec::new()),
+        draft: RefCell::new(Draft::default()),
         streak_base: RefCell::new(Vec::new()),
         editing: Cell::new(None),
         notice: Cell::new(Notice::None),
-        draft_for: Cell::new(None),
         saving: Cell::new(false),
         showing: Cell::new(false),
         ticket: Cell::new(0),
@@ -1552,7 +1510,7 @@ fn saved(result: Result<(), String>) {
             });
             let centre = with_ui(|u| {
                 u.saving.set(false);
-                u.draft_for.set(None);
+                u.draft.borrow_mut().forget();
                 let f = u.window.frame();
                 u.dismiss();
                 NSPoint::new(f.origin.x + f.size.width / 2.0, f.origin.y + f.size.height / 2.0)

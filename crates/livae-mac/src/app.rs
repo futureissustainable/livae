@@ -372,7 +372,9 @@ fn start(mtm: MainThreadMarker, delegate: &AppDelegate) {
     // First run: open at login, as a menu-bar utility should.
     let marker = config::support_dir().join(".first-run-done");
     let first_run = !marker.exists() && !test_mode();
-    if first_run && crate::access::set_open_at_login(true) {
+    if first_run {
+        // Once, whether or not macOS accepts the login item (it can be turned on in Settings), so Welcome shows once.
+        crate::access::set_open_at_login(true);
         let _ = std::fs::write(&marker, "");
     }
 

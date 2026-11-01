@@ -6,7 +6,7 @@ Written in Rust, native on macOS (Liquid Glass) and Windows 11, true black and q
 
 ## What it does
 
-- **Search** (Opt+Space on the Mac, Alt+Space on Windows): apps, files, maths and units. Enter opens, Cmd/Ctrl+Enter
+- **Search** (Opt+Space on the Mac, Alt+Space on Windows): apps, files, system settings, maths and units. Enter opens, Cmd/Ctrl+Enter
   shows the file in its folder.
 - **Clipboard history** (Shift+Cmd+C, Win+Shift+V): text, links, colours, images and files in one list, opened at your
   text cursor. Pin what you keep; copies from password managers are never recorded.
@@ -14,7 +14,7 @@ Written in Rust, native on macOS (Liquid Glass) and Windows 11, true black and q
   waits while you are away, presenting or in Do Not Disturb.
 - **Journal** (off until you turn it on): one short note a day, a day rating and your own habit check-ins with streaks,
   written to a plain Markdown file you choose. Compatible with Vesper's format.
-- **Year view** (macOS): every day of the year as a square, by mood or by habits done; point at a day or a colour to
+- **Year view**: every day of the year as a square, by mood or by habits done; point at a day or a colour to
   light the matching days.
 - **Livae for Zen** (optional browser extension in `extensions/livae-for-zen`): a short wait and a quote before distracting
   sites. With Livae installed it takes its sites, waits and quotes from Livae.
