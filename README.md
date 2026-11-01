@@ -25,7 +25,7 @@ Written in Rust, native on macOS (Liquid Glass) and Windows 11, true black and q
 
 ## Install
 
-Livae is not code-signed. Your system asks once before the first launch:
+Download the Mac (Apple silicon) and Windows builds from [Releases](https://github.com/futureissustainable/livae/releases). Livae is not code-signed. Your system asks once before the first launch:
 
 - **macOS:** move `Livae.app` to Applications and open it. If macOS says it cannot verify the developer, open
   **System Settings → Privacy & Security** and choose **Open Anyway**. Paste-into-app needs **Accessibility**

@@ -1,5 +1,6 @@
 #!/bin/bash
 # Build Livae on the Mac and install it to ~/Applications/Livae.app (menu-bar app, no Dock icon).
+# `--package`: build a release zip in dist/ instead (ad-hoc signed, nothing installed or restarted).
 # Build output stays outside the synced Code folder.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -7,7 +8,8 @@ export CARGO_TARGET_DIR="$HOME/.cache/cargo-target/livae"
 export PATH="$HOME/.cargo/bin:$PATH"
 command -v cargo >/dev/null || { echo "Rust is missing: install it with https://rustup.rs (user-level, no sudo)"; exit 1; }
 cargo build --release -p livae-mac
-APP="$HOME/Applications/Livae.app"
+PACKAGE=0; [ "${1:-}" = "--package" ] && PACKAGE=1
+APP="$HOME/Applications/Livae.app"; [ $PACKAGE = 1 ] && mkdir -p dist && APP="$PWD/dist/Livae.app"
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 rm -rf "$APP.new"
 mkdir -p "$APP.new/Contents/MacOS" "$APP.new/Contents/Resources"
@@ -32,6 +34,12 @@ cat > "$APP.new/Contents/Info.plist" <<PLIST
   <key>ATSApplicationFontsPath</key><string>Fonts</string>
 </dict></plist>
 PLIST
+if [ $PACKAGE = 1 ]; then
+  codesign --force --sign - "$APP.new" >/dev/null
+  rm -rf "$APP" && mv "$APP.new" "$APP"
+  ZIP="dist/Livae-$VERSION-macos-apple-silicon.zip"; rm -f "$ZIP"; ditto -c -k --keepParent "$APP" "$ZIP"
+  echo "packaged $ZIP"; exit 0
+fi
 # Sign with the local "Livae Local Signing" certificate (its own keychain), so macOS keeps the Accessibility
 # permission across rebuilds. Without it, fall back to an ad-hoc signature (permission must be granted again).
 KC="$HOME/Library/Keychains/livae-signing.keychain-db"
