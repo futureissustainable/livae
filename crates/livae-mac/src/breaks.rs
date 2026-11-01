@@ -398,7 +398,7 @@ fn notice(seconds: u32, long: bool) {
     crate::hud::show(&format!("{} in {seconds} s", if long { "Long break" } else { "Break" }), at);
 }
 
-/// The quotes in `quotes.md` (the built-in 13 when the file is missing or empty). Zen Gate gets the same list.
+/// The quotes in `quotes.md` (the built-in 13 when the file is missing or empty). Livae for Zen gets the same list.
 pub fn quotes() -> Vec<Quote> {
     breaks::load_quotes(&quotes_file())
 }

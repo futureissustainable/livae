@@ -4,7 +4,7 @@ Livae follows the Mateus Muste design system (v2). Its values are generated into
 
 ## Taken from the system
 
-- **Type:** Livae Sans (Livae's own typeface, SIL Open Font License, `assets/fonts`: Regular, Medium, SemiBold, Bold) for letters and figures in the app, with its tabular figures where numbers change in place; the system font stands in if it is missing. Zen Gate uses it too. Copied code uses a plain monospace (`--mm-font-code`). Styles: caption 12 (text colour only), label 14, body 16, title 20; break quote h3 28. Secondary text only from 14 px. Caps labels tracking .05em.
+- **Type:** Livae Sans (Livae's own typeface, SIL Open Font License, `assets/fonts`: Regular, Medium, SemiBold, Bold) for letters and figures in the app, with its tabular figures where numbers change in place; the system font stands in if it is missing. Livae for Zen uses it too. Copied code uses a plain monospace (`--mm-font-code`). Styles: caption 12 (text colour only), label 14, body 16, title 20; break quote h3 28. Secondary text only from 14 px. Caps labels tracking .05em.
 - **Colour:** text `#e6e8ea`, secondary `#cdd0d6`, tertiary `#a1a4aa` (placeholders), true black. Surfaces `#111111` / `#191a1b` / `#242423`, lines `#171717` / `#262626`, divider `#5a5a5a`, field underline `#7c7c7c`, focus `#9b9b9b`. Primary action `#f4f3f6` with `#14171c` text. Over glass, surfaces and lines are drawn as their white-over-black equivalents (6.7%, 10%, 14%; 9%, 15%, 40%).
 - **Spacing:** 4, 8, 12, 16, 24, 32, 48. Hit target 44.
 - **Corners (G2):** control 7.10, menu 11.36, panel 17.04. Circles stay circles.

@@ -1,4 +1,4 @@
-# Zen Gate
+# Livae for Zen
 
 A pause before X/Twitter, Reddit, YouTube and Instagram: a short wait with a quote, then a 15-minute pass. With Livae installed it reads its sites, waits and quotes from Livae (native messaging); without it, `config.js` and `quotes.json` apply.
 
@@ -6,7 +6,7 @@ X and Reddit start at 20 seconds and add five seconds per pass that day. YouTube
 
 The gate automatically continues when the wait ends. “Not now” or Escape leaves. Reduced-motion settings are respected.
 
-For Zen Browser, install the packaged XPI through **Add-ons → Install Add-on From File**. The extension is unsigned and requires a browser configuration that permits this custom extension. Its ID is `zen-gate@livae`.
+For Zen Browser, install the packaged XPI through **Add-ons → Install Add-on From File**. The extension is unsigned and requires a browser configuration that permits this custom extension. Its ID is `livae-for-zen@livae`.
 
 For Chromium development, load this directory unpacked through the browser's extension developer mode.
 

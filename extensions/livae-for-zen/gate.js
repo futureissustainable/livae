@@ -1,4 +1,4 @@
-// Zen Gate — the pause itself.
+// Livae for Zen — the pause itself.
 
 // Firefox exposes the promise-based `browser`; Chrome only `chrome`.
 const api = globalThis.browser ?? globalThis.chrome

@@ -1,4 +1,4 @@
-// Runs Zen Gate's background script against a fake browser API: with Livae answering, and without it.
+// Runs Livae for Zen's background script against a fake browser API: with Livae answering, and without it.
 
 export function fakeBrowser (nativeReply) {
   const store = {}
@@ -31,7 +31,7 @@ export function fakeBrowser (nativeReply) {
 export async function load (nativeReply) {
   const fake = fakeBrowser(nativeReply)
   globalThis.browser = fake.api
-  await import('../zen-gate/background.js')
+  await import('../livae-for-zen/background.js')
   await fake.listeners.installed[0]()
   const ask = message => new Promise(resolve => fake.listeners.message[0](message, {}, resolve))
   return { fake, ask }

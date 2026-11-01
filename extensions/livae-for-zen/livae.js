@@ -1,4 +1,4 @@
-// Zen Gate reads its sites, waits and quotes from Livae when Livae is installed (native messaging host
+// Livae for Zen reads its sites, waits and quotes from Livae when Livae is installed (native messaging host
 // com.mateus.livae). Without Livae, or when it does not answer, the built-in config.js and quotes.json stay in use.
 
 import { SITES, PASS_MINUTES } from './config.js'

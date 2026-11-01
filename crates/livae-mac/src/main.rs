@@ -36,7 +36,7 @@ mod welcome;
 
 #[cfg(target_os = "macos")]
 fn main() {
-    // Started by the browser for Zen Gate: answer and exit, no app.
+    // Started by the browser for Livae for Zen: answer and exit, no app.
     if gate::is_host_call() {
         gate::serve();
         return;

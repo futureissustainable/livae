@@ -17,7 +17,7 @@ evening journal. Written in Rust, native on macOS (Liquid Glass) and Windows 11,
   written to a plain Markdown file you choose. Compatible with Vesper's format.
 - **Year view** (macOS): every day of the year as a square, by mood or by habits done; point at a day or a colour to
   light the matching days.
-- **Zen Gate** (optional browser extension in `extensions/zen-gate`): a short wait and a quote before distracting
+- **Livae for Zen** (optional browser extension in `extensions/livae-for-zen`): a short wait and a quote before distracting
   sites. With Livae installed it takes its sites, waits and quotes from Livae.
 
 ![Clipboard](assets/screenshots/clipboard.png)
@@ -42,7 +42,7 @@ Everything is in one file (the Mac also has a Settings window):
 - Windows: `%APPDATA%\Livae\settings.toml`
 
 Shortcuts, glass darkness, clipboard size, ignored apps, the `[breaks]` and `[journal]` tables (`enabled = true` to
-turn them on) and Zen Gate's sites all live there. Break quotes are in `quotes.md` next to it.
+turn them on) and Livae for Zen's sites all live there. Break quotes are in `quotes.md` next to it.
 
 ## Build
 

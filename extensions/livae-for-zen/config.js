@@ -1,4 +1,4 @@
-// Zen Gate — the only file you need to edit to tune behaviour.
+// Livae for Zen — the only file you need to edit to tune behaviour.
 
 // Each entry is one gate. `domains` covers the domain and all its subdomains
 // (www.reddit.com, old.reddit.com, m.youtube.com all match).

@@ -29,7 +29,7 @@ pub struct Settings {
     pub breaks: Breaks,
     /// The evening journal (the Vesper prompt).
     pub journal: Journal,
-    /// Zen Gate's sites, waits and pass length (the browser add-on reads them from Livae).
+    /// Livae for Zen's sites, waits and pass length (the browser add-on reads them from Livae).
     pub gate: Gate,
     /// Apps whose copies the clipboard never records (bundle ids, e.g. "com.apple.keychainaccess").
     pub ignore_apps: Vec<String>,
@@ -45,7 +45,7 @@ pub struct GateSite {
     pub step: u32,
 }
 
-/// Defaults are Zen Gate 1.3.4's config.js (31.10.2026).
+/// Defaults are Livae for Zen 1.3.4 (now Livae for Zen)'s config.js (31.10.2026).
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Gate {
@@ -75,7 +75,7 @@ impl Default for Gate {
 }
 
 impl Default for Settings {
-    /// The shared Mac defaults from livae-core, plus Zen Gate's sites (Mac only).
+    /// The shared Mac defaults from livae-core, plus Livae for Zen's sites (Mac only).
     fn default() -> Self {
         let c = livae_core::settings::Settings::defaults_for(livae_core::settings::Platform::Mac);
         Self {

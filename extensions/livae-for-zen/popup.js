@@ -1,4 +1,4 @@
-// Zen Gate — what today has cost you, per site.
+// Livae for Zen — what today has cost you, per site.
 
 const api = globalThis.browser ?? globalThis.chrome
 

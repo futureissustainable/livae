@@ -1,4 +1,4 @@
-//! Zen Gate (the browser add-on) reads its sites, waits and quotes from Livae through Firefox native messaging.
+//! Livae for Zen (the browser add-on) reads its sites, waits and quotes from Livae through Firefox native messaging.
 //! The browser starts this same binary with the host manifest path and the add-on id as arguments; Livae then
 //! answers one request on stdin/stdout and exits, without starting the app.
 
@@ -9,15 +9,15 @@ use serde_json::json;
 use crate::config;
 
 const HOST: &str = "com.mateus.livae";
-/// The extension's id, and the id of builds from before the public release (still allowed to call).
-const ADDONS: [&str; 2] = ["zen-gate@livae", "zen-gate@god.local"];
+/// The add-on's id, and the ids it had as "Livae for Zen" before the rename (installed copies keep calling with them).
+const ADDONS: [&str; 3] = ["livae-for-zen@livae", "zen-gate@livae", "zen-gate@god.local"];
 
 /// True when the browser started us as the native messaging host.
 pub fn is_host_call() -> bool {
     std::env::args().skip(1).any(|a| ADDONS.contains(&a.as_str()) || a.ends_with(&format!("{HOST}.json")))
 }
 
-/// What Zen Gate gets: the sites and waits from Settings, the quotes from `quotes.md` (the same ones the breaks show).
+/// What Livae for Zen gets: the sites and waits from Settings, the quotes from `quotes.md` (the same ones the breaks show).
 fn gate_config() -> serde_json::Value {
     let s = config::get();
     let quotes: Vec<serde_json::Value> = crate::breaks::quotes()
@@ -50,7 +50,7 @@ pub fn serve() {
     }
 }
 
-/// Register Livae as the host for Zen Gate (Firefox and Zen read the Mozilla folder). Rewritten at every start,
+/// Register Livae as the host for Livae for Zen (Firefox and Zen read the Mozilla folder). Rewritten at every start,
 /// so it always points at the installed binary.
 pub fn install_manifest() {
     let Ok(exe) = std::env::current_exe() else { return };
@@ -60,7 +60,7 @@ pub fn install_manifest() {
     }
     let manifest = json!({
         "name": HOST,
-        "description": "Livae: Zen Gate sites, waits and quotes",
+        "description": "Livae: Livae for Zen sites, waits and quotes",
         "path": exe,
         "type": "stdio",
         "allowed_extensions": ADDONS,
