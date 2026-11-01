@@ -1,0 +1,20 @@
+@import url("theme.css");
+html, body { min-height: 100%; }
+.gate { min-height: 100svh; display: flex; flex-direction: column; padding: 24px clamp(24px, 6vw, 96px); animation: appear 240ms var(--ease); }
+.brand { margin: 0; color: var(--dim); font-size: 13px; letter-spacing: .05em; text-transform: uppercase; }
+.stage { flex: 1; display: flex; align-items: center; padding: 64px 0; }
+.idea { margin: 0; max-width: 24em; font-weight: 500; font-size: clamp(24px, 2.4vw, 32px); line-height: 1.25; letter-spacing: -.02em; }
+.zen-author { display: block; margin-top: 16px; font-size: 14px; line-height: 1.6; font-weight: 400; letter-spacing: 0; color: var(--dim); }
+.footer { display: flex; gap: 24px; align-items: center; justify-content: space-between; padding-top: 16px; }
+.meta { color: var(--dim); font-size: 13px; }
+.timer { font-variant-numeric: tabular-nums; font-size: 14px; min-width: 48px; text-align: right; }
+.actions { margin-left: auto; }
+.actions button { min-height: 44px; padding: 8px 20px; border: 1px solid var(--hair); border-radius: 5px; color: var(--fg); background: transparent; transition: background 160ms var(--ease), transform 160ms var(--ease); }
+.actions button:hover { background: #242423; }
+.actions button:active { transform: scale(.97); }
+body.zen-out .gate { opacity: 0; transition: opacity 240ms var(--ease); }
+@keyframes appear { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@media(max-width: 600px) { .gate { padding-top: 24px; } .footer { flex-wrap: wrap; gap: 16px; } .meta { width: 100%; } .actions { margin-left: 0; } .timer { margin-left: auto; } }
+@media(prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } .actions button:active { transform: none; } }
+
+.zen-quote { white-space: pre-line; }

@@ -1,0 +1,90 @@
+/* Livae design tokens (see DESIGN.md). Letters use the system font; digits and symbols use Departure Mono (OFL). */
+@font-face{font-family:"MM Symbols";font-weight:400;font-display:swap;src:url("./fonts/departure-mono.woff2") format("woff2");unicode-range:U+21-2B,U+2F-3F,U+40,U+5B-60,U+7B-7E,U+A0-BF,U+D7,U+2013-2014,U+2018-201D,U+2022,U+2026,U+2032-2033,U+2039-203A,U+20AC,U+2116,U+2190-2193,U+B7}
+
+:root {
+  --mm-font-ui:"MM Symbols",-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+  --mm-font-code:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  --mm-canvas:#000000;
+  --mm-surface:#111111;
+  --mm-surface-hover:#191a1b;
+  --mm-surface-strong:#242423;
+  --mm-text:#e6e8ea;
+  --mm-text-muted:#aaadb3;
+  --mm-line:#191a1b;
+  --mm-line-strong:#313336;
+  --mm-control-line:#737579;
+  --mm-focus:#b3b3b3;
+  --mm-action:#f4f3f6;
+  --mm-action-text:#14171c;
+  --mm-warm:#faf9f7;
+  --mm-stone:#f0eee9;
+  --mm-white:#ffffff;
+  --mm-shadow:0 4px 10px -4px #0003;
+  --mm-content-max:1400px;
+  --mm-content-gutter:3%;
+  --mm-text-max:1280px;
+  --mm-text-gutter:5%;
+  --mm-space-1:4px; --mm-space-2:8px; --mm-space-3:12px;
+  --mm-space-4:16px; --mm-space-6:24px; --mm-space-8:32px; --mm-space-12:48px;
+  --mm-section-sm:1rem; --mm-section-md:2rem; --mm-section-lg:5rem;
+  --mm-section-xl:10rem; --mm-section-2xl:20rem;
+  --mm-text-hero:6rem; --mm-text-h1:4.5rem; --mm-text-h2:2.8rem;
+  --mm-text-h3:1.75rem; --mm-text-h4:1.35rem; --mm-text-p1:1.1rem; --mm-text-p2:.9rem;
+  --mm-leading-hero:.95; --mm-leading-h1:1.1; --mm-leading-h2:1.15;
+  --mm-leading-h3:1.25; --mm-leading-h4:1.4; --mm-leading-p1:1.7; --mm-leading-p2:1.6;
+  --mm-ui-meta:.75rem; --mm-ui-label:.875rem; --mm-ui-body:1rem; --mm-ui-title:1.25rem;
+  --mm-tracking-heading:-.05em; --mm-tracking-body:0; --mm-tracking-caps:.05em;
+  --mm-radius-control:5px; --mm-radius-menu:8px; --mm-radius-panel:12px;
+  --mm-hit:44px; --mm-row:32px;
+  --mm-ease-out:cubic-bezier(.23,1,.32,1);
+  --mm-ease-in-out:cubic-bezier(.77,0,.175,1);
+  --mm-ease-drawer:cubic-bezier(.32,.72,0,1);
+  --mm-duration-press:160ms; --mm-duration-pop:200ms; --mm-duration-panel:240ms;
+}
+[data-mm-theme="light"] {
+  --mm-canvas:#faf9f7; --mm-surface:#ffffff; --mm-surface-hover:#f1f1f1; --mm-surface-strong:#f0eee9;
+  --mm-text:#14171c; --mm-text-muted:#686a6e;
+  --mm-line:#e5e7eb; --mm-line-strong:#d3d4d6; --mm-control-line:#737579;
+  --mm-focus:#737373; --mm-action:#000000; --mm-action-text:#f4f3f6;
+}
+@media(max-width:767px) {
+  :root {--mm-section-lg:3rem; --mm-section-xl:5rem; --mm-section-2xl:10rem;
+    --mm-text-hero:3.5rem; --mm-text-h1:3.2rem; --mm-text-h2:2.2rem;
+    --mm-text-h3:1.5rem; --mm-text-h4:1.2rem; --mm-text-p1:1rem; --mm-text-p2:.85rem;}
+}
+@media(max-width:479px) {
+  :root {--mm-section-lg:2.5rem; --mm-section-xl:4rem; --mm-section-2xl:8rem;}
+}
+/* G2 corners, opt-in on the root. Circles are never compensated. */
+@supports(corner-shape:superellipse(1.5849625)) {
+  [data-mm-corners="g2"] {--mm-radius-control:7.09873886520133px; --mm-radius-menu:11.357982184322128px; --mm-radius-panel:17.036973276483192px;}
+  [data-mm-corners="g2"] :is(.mm-control,.mm-field,.mm-panel) {corner-shape:superellipse(1.5849625);}
+}
+:where(.mm-app,.mm-app *) {box-sizing:border-box;}
+.mm-app {margin:0; font:400 var(--mm-ui-body)/1.6 var(--mm-font-ui); color:var(--mm-text); background:var(--mm-canvas); -webkit-font-smoothing:antialiased;}
+:where(.mm-app :is(button,input,textarea,select)) {font:inherit;}
+.mm-app :is(code,pre,kbd) {font-family:var(--mm-font-code); letter-spacing:0;}
+.mm-app :is(button,input,textarea,select,a,summary):focus-visible {outline:2px solid var(--mm-focus); outline-offset:3px;}
+.mm-app ::selection {background:color-mix(in srgb,var(--mm-focus) 25%,transparent);}
+.mm-content {box-sizing:border-box; width:100%; max-width:var(--mm-content-max); margin-inline:auto; padding-inline:var(--mm-content-gutter);}
+.mm-text-container {box-sizing:border-box; width:100%; max-width:var(--mm-text-max); margin-inline:auto; padding-inline:var(--mm-text-gutter);}
+.mm-split {display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:var(--mm-space-8);}
+.mm-split-feature {grid-template-columns:minmax(0,3fr) minmax(0,2fr);}
+.mm-hero {font-size:var(--mm-text-hero); line-height:var(--mm-leading-hero); font-weight:500; letter-spacing:var(--mm-tracking-heading);}
+.mm-heading {font-size:var(--mm-text-h2); line-height:var(--mm-leading-h2); font-weight:500; letter-spacing:var(--mm-tracking-heading);}
+.mm-copy {font-size:var(--mm-text-p1); line-height:var(--mm-leading-p1); max-width:65ch;}
+.mm-muted {color:var(--mm-text-muted);}
+.mm-control {display:inline-flex; align-items:center; justify-content:center; gap:8px; min-height:var(--mm-hit); padding:8px 16px; border:1px solid var(--mm-control-line); border-radius:var(--mm-radius-control); background:transparent; color:var(--mm-text); cursor:pointer; font-size:var(--mm-ui-label); line-height:1.4; transition:background-color var(--mm-duration-press) var(--mm-ease-out),transform var(--mm-duration-press) var(--mm-ease-out);}
+.mm-control-primary {background:var(--mm-action); color:var(--mm-action-text); border-color:var(--mm-action);}
+@media(hover:hover) {.mm-control:hover {background:var(--mm-surface-strong);} .mm-control-primary:hover {background:color-mix(in srgb,var(--mm-action) 92%,var(--mm-action-text));}}
+.mm-control:active {transform:scale(.97);}
+.mm-control:disabled {opacity:.45; cursor:not-allowed; transform:none;}
+.mm-field {width:100%; min-height:var(--mm-hit); padding:10px 12px; color:var(--mm-text); background:var(--mm-surface); border:1px solid var(--mm-control-line); border-radius:var(--mm-radius-control);}
+.mm-field::placeholder {color:var(--mm-text-muted); opacity:1;}
+.mm-panel {background:var(--mm-surface); border-radius:var(--mm-radius-panel);}
+@media(max-width:767px) {.mm-split {grid-template-columns:minmax(0,1fr);}}
+@media(pointer:coarse) {:root {--mm-row:44px;} .mm-field {font-size:1rem;}}
+@media(prefers-reduced-motion:reduce) {
+  :root {--mm-duration-press:0ms; --mm-duration-pop:0ms; --mm-duration-panel:0ms;}
+  .mm-control:active {transform:none; opacity:.82;}
+}

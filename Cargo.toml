@@ -1,0 +1,14 @@
+[workspace]
+resolver = "3"
+members = ["crates/livae-core", "crates/livae-mac", "crates/livae-win"]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2024"
+publish = false
+license = "MIT"
+repository = "https://github.com/futureissustainable/livae"
+
+[workspace.dependencies]
+livae-core = { path = "crates/livae-core" }
+global-hotkey = "0.9"

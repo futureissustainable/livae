@@ -1,0 +1,7 @@
+@import url("tokens.css");
+:root { color-scheme: dark; --fg: #e6e8ea; --dim: #aaadb3; --bg: #000000; --hair: #313336; --ease: cubic-bezier(.23,1,.32,1); }
+* { box-sizing: border-box; }
+body { margin: 0; color: var(--fg); background: var(--bg); font: 400 14px/1.6 var(--mm-font-ui); -webkit-font-smoothing: antialiased; }
+button, a { -webkit-tap-highlight-color: transparent; }
+button { font: inherit; cursor: pointer; }
+button:focus-visible, a:focus-visible { outline: 2px solid var(--fg); outline-offset: 4px; }

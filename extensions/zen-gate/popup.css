@@ -1,0 +1,9 @@
+@import url("theme.css");
+body { width: 320px; padding: 20px; }
+h1 { font-size: 20px; font-weight: 500; letter-spacing: -.05em; margin: 0 0 16px; }
+.sites { margin: 0; padding: 0; list-style: none; }
+.sites li { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; padding: 14px 0; }
+.sites li + li { border-top: 1px solid var(--hair); }
+.wait { font-size: 12px; color: var(--dim); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.wait b { font-weight: 500; color: var(--fg); }
+.open .wait b { color: #a8c652; }

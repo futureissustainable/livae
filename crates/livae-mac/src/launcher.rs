@@ -1,0 +1,846 @@
+//! The launcher, in the macOS 27 Spotlight shape: a glass search capsule and, below it, a separate glass card with
+//! the results, grouped in one `NSGlassEffectContainerView`.
+//!
+//! Empty query: the scopes (Applications, Files, Settings). Typing: a calculator answer when the query is maths,
+//! apps ranked by match and by how often you open them, then files from Spotlight's index (searched off the main
+//! thread). Mouse: hover selects, click opens. Keys: ↑↓, Enter, ⌘1-⌘9, ⌘, (Settings), Esc. A click outside closes.
+
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::io::{BufRead, BufReader};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
+use objc2::rc::Retained;
+use objc2::runtime::AnyClass;
+use objc2::{sel, MainThreadOnly};
+use objc2_app_kit::{
+    NSAutoresizingMaskOptions, NSBox, NSEvent, NSFont, NSGlassEffectContainerView, NSImage, NSImageView, NSPasteboard, NSPasteboardTypeString,
+    NSTextAlignment, NSTextField, NSView, NSWorkspace,
+};
+use objc2_foundation::{ns_string, MainThreadMarker, NSPoint, NSRect, NSSize, NSString, NSURL};
+
+use crate::apps::{self, App, Usage};
+use crate::config;
+use crate::glass::Glass;
+use crate::list::{List, Owner};
+use crate::panel::{Controller, Event, Panel};
+use crate::ui::{self, SECONDARY, TERTIARY, TEXT};
+
+const WIDTH: f64 = 720.0;
+const FIELD_H: f64 = 56.0;
+/// Space between the capsule and the card.
+const GAP: f64 = 10.0;
+const ROW_H: f64 = 44.0;
+const INSET: f64 = 8.0;
+const EDGE: f64 = 16.0;
+/// One text column: 16 edge + 24 icon + 12 gap (the field starts at 56 in its capsule, same optical column).
+const TEXT_X: f64 = 56.0;
+/// Rows on screen; the list scrolls through up to MAX_ITEMS.
+const MAX_ROWS: usize = 9;
+const MAX_ITEMS: usize = 40;
+const CARD_RADIUS: f64 = 24.0;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Scope {
+    All,
+    Apps,
+    Files,
+}
+
+#[derive(Clone)]
+enum Item {
+    Scope { title: &'static str, scope: Scope },
+    Clipboard,
+    App(usize),
+    File(PathBuf),
+    Calc(String),
+    /// "5 km to mi": the converted value and its unit label, e.g. ("3.107", "mi").
+    Convert(String, String),
+    Settings,
+    /// Nothing local fits: search the web for the query.
+    Web(String),
+    /// macOS still hides Desktop, Documents and Downloads from file search: ask once.
+    AllowFolders,
+    Searching,
+    Empty,
+}
+
+struct Row {
+    highlight: Retained<NSBox>,
+    icon: Retained<NSImageView>,
+    title: Retained<NSTextField>,
+    detail: Retained<NSTextField>,
+    hint: Retained<NSTextField>,
+}
+
+pub struct Launcher {
+    mtm: MainThreadMarker,
+    panel: Retained<Panel>,
+    capsule: Glass,
+    card: Glass,
+    field: Retained<NSTextField>,
+    field_font: Retained<NSFont>,
+    search_icon: Retained<NSImageView>,
+    rows: Vec<Row>,
+    apps: Vec<App>,
+    names: Vec<String>,
+    usage: Usage,
+    icons: HashMap<String, Retained<NSImage>>,
+    items: Vec<Item>,
+    files: Vec<PathBuf>,
+    /// Bumped on every edit; a file search whose ticket is stale is dropped.
+    generation: Arc<AtomicU64>,
+    /// The mdfind running for the newest search (its ticket), killed as soon as the text changes.
+    running: Arc<std::sync::Mutex<Option<(u64, std::process::Child)>>>,
+    /// True while a file search for the current text is running.
+    searching: bool,
+    scope: Scope,
+    selected: usize,
+    /// First item on screen (the list scrolls by moving this).
+    first: usize,
+    /// Recently opened apps (from macOS's own records), for day-one ranking.
+    recent: Arc<std::sync::Mutex<HashMap<String, u32>>>,
+    top: f64,
+    card_h: f64,
+    _controller: Retained<Controller>,
+    _list: Retained<List>,
+}
+
+thread_local! {
+    static LAUNCHER: RefCell<Option<Launcher>> = const { RefCell::new(None) };
+}
+
+/// Runs `f` on the launcher. Re-entrant calls (AppKit calling back while we hold it) are skipped.
+pub fn with(f: impl FnOnce(&mut Launcher)) {
+    LAUNCHER.with(|cell| {
+        if let Ok(mut slot) = cell.try_borrow_mut() {
+            if let Some(l) = slot.as_mut() {
+                f(l);
+            }
+        }
+    });
+}
+
+pub fn toggle() {
+    with(|l| if l.panel.isVisible() { l.hide() } else { l.show() });
+}
+
+pub fn set_glass(darkness: f64) {
+    // Never so clear that white text loses its ground.
+    let darkness = darkness.max(0.35);
+    with(|l| {
+        l.capsule.set_darkness(darkness);
+        l.card.set_darkness(darkness * 0.8);
+    });
+}
+
+fn evaluate(q: &str) -> Option<String> {
+    let q = q.trim();
+    if !q.chars().any(|c| c.is_ascii_digit()) || !q.chars().any(|c| "+-*/^%()".contains(c)) {
+        return None;
+    }
+    let value = evalexpr::eval(&q.replace('×', "*").replace('÷', "/").replace(',', ".")).ok()?;
+    match value {
+        evalexpr::Value::Int(n) => Some(n.to_string()),
+        evalexpr::Value::Float(f) if f.is_finite() => {
+            let s = format!("{f:.10}");
+            Some(s.trim_end_matches('0').trim_end_matches('.').to_string())
+        }
+        _ => None,
+    }
+}
+
+pub fn install(mtm: MainThreadMarker) {
+    let controller = Controller::new(mtm, Owner::Launcher);
+    let panel = Panel::new(mtm, Owner::Launcher, &controller);
+    let s = config::get();
+
+    let capsule = Glass::new(mtm, FIELD_H / 2.0, s.glass.max(0.35));
+    let (search_icon, field, field_font) = ui::search_field(mtm, &controller, "Search apps and files", WIDTH, 24.0);
+    capsule.content.addSubview(&search_icon);
+    capsule.content.addSubview(&field);
+
+    let card = Glass::new(mtm, CARD_RADIUS, s.glass.max(0.35) * 0.8);
+    let list = List::new(mtm, Owner::Launcher);
+    // No autoresizing: layout() sets the frame; a stretchy mask on top of that shrank it twice inside the glass.
+    card.content.addSubview(&list);
+    let rows = (0..MAX_ROWS)
+        .map(|_| {
+            let highlight = ui::band(mtm, CARD_RADIUS - INSET);
+            let icon = NSImageView::new(mtm);
+            let title = ui::label(mtm, 16.0, TEXT);
+            let detail = ui::label(mtm, 14.0, SECONDARY);
+            let hint = ui::label(mtm, 14.0, SECONDARY);
+            hint.setAlignment(NSTextAlignment::Right);
+            for v in [&*highlight as &NSView, &icon, &title, &detail, &hint] {
+                list.addSubview(v);
+                v.setHidden(true);
+            }
+            Row { highlight, icon, title, detail, hint }
+        })
+        .collect();
+
+    // Both shapes in one glass container, so they render and move as one Liquid Glass surface.
+    let rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(WIDTH, FIELD_H));
+    let inner = NSView::initWithFrame(NSView::alloc(mtm), rect);
+    inner.addSubview(&capsule.root);
+    inner.addSubview(&card.root);
+    let root: Retained<NSView> = if AnyClass::get(c"NSGlassEffectContainerView").is_some() {
+        let c = NSGlassEffectContainerView::new(mtm);
+        c.setSpacing(GAP / 2.0);
+        inner.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable);
+        c.setContentView(Some(&inner));
+        Retained::into_super(c)
+    } else {
+        inner
+    };
+    panel.setContentView(Some(&root));
+
+    let apps = apps::scan();
+    let names = apps.iter().map(|a| a.name.clone()).collect();
+    let launcher = Launcher {
+        mtm,
+        panel,
+        capsule,
+        card,
+        field,
+        field_font,
+        search_icon,
+        rows,
+        apps,
+        names,
+        usage: Usage::load(),
+        icons: HashMap::new(),
+        items: Vec::new(),
+        files: Vec::new(),
+        generation: Arc::new(AtomicU64::new(0)),
+        running: Arc::new(std::sync::Mutex::new(None)),
+        searching: false,
+        scope: Scope::All,
+        selected: 0,
+        first: 0,
+        recent: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        top: 0.0,
+        card_h: 0.0,
+        _controller: controller,
+        _list: list,
+    };
+    LAUNCHER.with(|cell| *cell.borrow_mut() = Some(launcher));
+    // Holding ⌘ reveals the ⌘1-⌘9 shortcuts; letting go hides them again.
+    let flags = block2::RcBlock::new(|event: std::ptr::NonNull<NSEvent>| -> *mut NSEvent {
+        let cmd = unsafe { event.as_ref() }.modifierFlags().contains(objc2_app_kit::NSEventModifierFlags::Command);
+        if CMD.with(|c| c.replace(cmd)) != cmd {
+            with(|l| {
+                if l.panel.isVisible() {
+                    l.paint_selection();
+                }
+            });
+        }
+        event.as_ptr()
+    });
+    if let Some(m) = unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(objc2_app_kit::NSEventMask::FlagsChanged, &flags) } {
+        std::mem::forget(m); // lives as long as the app
+    }
+}
+
+/// Folders full of files nobody opens by hand (package managers, build output); never shown as file results.
+const NOISE: [&str; 9] = ["node_modules", "site-packages", "__pycache__", "target", "vendor", "Pods", "DerivedData", "bower_components", "venv"];
+
+thread_local! {
+    static PENDING_QUERY: RefCell<String> = const { RefCell::new(String::new()) };
+    /// ⌘ is held: rows show their ⌘1-⌘9 shortcuts.
+    static CMD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+impl Launcher {
+    pub fn show(&mut self) {
+        CMD.with(|c| c.set(NSEvent::modifierFlags_class().contains(objc2_app_kit::NSEventModifierFlags::Command)));
+        crate::clipboard::with(|c| c.hide());
+        self.rescan_apps();
+        self.field.setStringValue(ns_string!(""));
+        self.set_scope(Scope::All);
+        self.selected = 0;
+        self.first = 0;
+        let vf = ui::visible_frame_at(self.mtm, NSEvent::mouseLocation());
+        self.top = if crate::app::offscreen() { ui::OFFSCREEN } else { vf.origin.y + vf.size.height * 0.78 };
+        let x = vf.origin.x + (vf.size.width - WIDTH) / 2.0;
+        self.panel.setFrameOrigin(NSPoint::new(x, self.top - FIELD_H));
+        self.query_changed();
+        ui::present(&self.panel);
+        self.panel.makeFirstResponder(Some(&self.field));
+    }
+
+    /// Apps installed or removed since the last open, found off the main thread so the panel opens at once.
+    fn rescan_apps(&self) {
+        let recent = self.recent.clone();
+        std::thread::spawn(move || {
+            let fresh = apps::scan();
+            apps::recent_scores(fresh.iter().map(|a| (a.name.clone(), a.path.clone())).collect(), recent);
+            dispatch2::DispatchQueue::main().exec_async(move || {
+                with(|l| {
+                    let names: Vec<String> = fresh.iter().map(|a| a.name.clone()).collect();
+                    let changed = names != l.names;
+                    if changed {
+                        l.apps = fresh;
+                        l.names = names;
+                    }
+                    // New apps, or fresh "last opened" dates for the most used row: redraw what is open.
+                    let q = l.field.stringValue().to_string();
+                    let empty_with_recents = q.trim().is_empty() && l.scope == Scope::All && config::get().recent_apps;
+                    if l.panel.isVisible() && l.scope != Scope::Files && (changed || empty_with_recents) {
+                        l.rebuild(&q);
+                    }
+                })
+            });
+        });
+    }
+
+    pub fn set_query(&mut self, q: &str) {
+        self.field.setStringValue(&NSString::from_str(q));
+        self.query_changed();
+    }
+
+    pub fn hide(&mut self) {
+        if self.panel.isVisible() {
+            self.generation.fetch_add(1, Ordering::SeqCst);
+            self.panel.orderOut(None);
+        }
+    }
+
+    /// Keyboard, field and focus events from the shared panel.
+    pub fn event(&mut self, event: Event) -> bool {
+        match event {
+            Event::TextChanged => {
+                self.selected = 0;
+                self.query_changed();
+                true
+            }
+            Event::Command(c) if c == sel!(moveDown:) => {
+                self.move_selection(1);
+                true
+            }
+            Event::Command(c) if c == sel!(moveUp:) => {
+                self.move_selection(-1);
+                true
+            }
+            Event::Command(c) if c == sel!(insertNewline:) => {
+                self.open_index(self.selected);
+                true
+            }
+            Event::Command(c) if c == sel!(cancelOperation:) => {
+                self.hide();
+                true
+            }
+            // Backspace on an empty query leaves the scope (Files → everything).
+            Event::Command(c) if c == sel!(deleteBackward:) => self.leave_scope_if_empty(),
+            Event::Command(_) => false,
+            Event::Key(",") => {
+                self.hide();
+                crate::settings::show();
+                true
+            }
+            // ⌘↵ shows the selected file in Finder.
+            Event::Key("\r") => {
+                if let Some(Item::File(p)) = self.items.get(self.selected).cloned() {
+                    let url = NSURL::fileURLWithPath(&NSString::from_str(&p.to_string_lossy()));
+                    NSWorkspace::sharedWorkspace().activateFileViewerSelectingURLs(&objc2_foundation::NSArray::from_retained_slice(&[url]));
+                    self.hide();
+                }
+                true
+            }
+            Event::Key(k) => match k.chars().next().and_then(|c| c.to_digit(10)) {
+                Some(n) if n >= 1 && k.len() == 1 => {
+                    self.open_index(self.first + n as usize - 1);
+                    true
+                }
+                _ => false,
+            },
+            Event::Resigned => {
+                self.hide();
+                true
+            }
+        }
+    }
+
+    /// Right click on an app or a file: open, show in Finder, copy the path.
+    pub fn menu_items(&mut self, y: f64) -> Vec<(&'static str, isize)> {
+        let slot = ((self.card_h - INSET - y) / ROW_H).floor();
+        if slot < 0.0 {
+            return Vec::new();
+        }
+        let i = self.first + slot as usize;
+        let items = match self.items.get(i) {
+            Some(Item::App(_)) => vec![("Open", 11), ("Show in Finder", 12)],
+            Some(Item::File(_)) => vec![("Open", 11), ("Show in Finder", 12), ("Copy Path", 13)],
+            _ => return Vec::new(),
+        };
+        self.selected = i;
+        self.paint_selection();
+        items
+    }
+
+    pub fn menu_action(&mut self, tag: isize) {
+        let path = match self.items.get(self.selected) {
+            Some(Item::App(a)) => self.apps[*a].path.clone(),
+            Some(Item::File(p)) => p.clone(),
+            _ => return,
+        };
+        match tag {
+            11 => self.open_index(self.selected),
+            12 => {
+                let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
+                NSWorkspace::sharedWorkspace().activateFileViewerSelectingURLs(&objc2_foundation::NSArray::from_retained_slice(&[url]));
+                self.hide();
+            }
+            13 => {
+                let pb = objc2_app_kit::NSPasteboard::generalPasteboard();
+                pb.clearContents();
+                pb.setString_forType(&NSString::from_str(&path.to_string_lossy()), unsafe { objc2_app_kit::NSPasteboardTypeString });
+                let f = self.panel.frame();
+                crate::hud::show("Path copied", NSPoint::new(f.origin.x + WIDTH / 2.0, f.origin.y + f.size.height - FIELD_H / 2.0));
+            }
+            _ => {}
+        }
+    }
+
+    /// Mouse over the list: hover selects, click opens.
+    pub fn pointer(&mut self, y: f64, click: bool) {
+        let slot = ((self.card_h - INSET - y) / ROW_H).floor();
+        if slot < 0.0 {
+            return;
+        }
+        let i = self.first + slot as usize;
+        if i >= self.items.len() {
+            return;
+        }
+        if click {
+            self.open_index(i);
+        } else if i != self.selected {
+            self.selected = i;
+            self.paint_selection();
+        }
+    }
+
+    fn set_scope(&mut self, scope: Scope) {
+        self.scope = scope;
+        let (text, symbol) = match scope {
+            Scope::All => ("Search apps and files", "magnifyingglass"),
+            Scope::Apps => ("Search applications", "square.grid.2x2"),
+            Scope::Files => ("Search files by name", "folder"),
+        };
+        self.field.setPlaceholderAttributedString(Some(&ui::placeholder(text, &self.field_font)));
+        if let Some(img) = ui::symbol(symbol) {
+            self.search_icon.setImage(Some(&img));
+        }
+    }
+
+    fn leave_scope_if_empty(&mut self) -> bool {
+        if self.scope != Scope::All && self.field.stringValue().length() == 0 {
+            self.set_scope(Scope::All);
+            self.query_changed();
+            return true;
+        }
+        false
+    }
+
+    fn query_changed(&mut self) {
+        let q = self.field.stringValue().to_string();
+        let ticket = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        self.files.clear();
+        self.searching = false;
+        let wants_files = self.scope == Scope::Files || (self.scope == Scope::All && q.trim().chars().count() >= 2);
+        if wants_files && !q.trim().is_empty() {
+            self.searching = true;
+            self.search_files(q.trim().to_string(), ticket);
+        }
+        self.rebuild(&q);
+    }
+
+    fn rebuild(&mut self, q: &str) {
+        let mut items = Vec::new();
+        let q = q.trim();
+        if q.is_empty() {
+            match self.scope {
+                Scope::All => {
+                    // The apps you open most come first when turned on in Settings; the scopes follow.
+                    let recent = self.recent.lock().map(|r| r.clone()).unwrap_or_default();
+                    let score = |i: usize| self.usage.boost(&self.apps[i].name) + recent.get(&self.apps[i].name).copied().unwrap_or(0);
+                    let mut top: Vec<usize> = (0..self.apps.len()).filter(|&i| score(i) > 0).collect();
+                    top.sort_by_key(|&i| std::cmp::Reverse(score(i)));
+                    if config::get().recent_apps {
+                        items.extend(top.into_iter().take(5).map(Item::App));
+                    }
+                    items.push(Item::Scope { title: "Applications", scope: Scope::Apps });
+                    items.push(Item::Scope { title: "Files", scope: Scope::Files });
+                    items.push(Item::Clipboard);
+                    items.push(Item::Settings);
+                }
+                Scope::Apps => {
+                    let mut by_use: Vec<usize> = (0..self.apps.len()).collect();
+                    let recent = self.recent.lock().map(|r| r.clone()).unwrap_or_default();
+                    by_use.sort_by_key(|&i| std::cmp::Reverse(self.usage.boost(&self.apps[i].name) + recent.get(&self.apps[i].name).copied().unwrap_or(0)));
+                    items.extend(by_use.into_iter().take(MAX_ITEMS).map(Item::App));
+                }
+                Scope::Files => items.push(Item::Empty),
+            }
+        } else {
+            if let Some(v) = evaluate(q) {
+                items.push(Item::Calc(v));
+            }
+            if let Some(results) = livae_core::units::convert_query(q) {
+                items.extend(results.iter().take(3).map(|r| Item::Convert(livae_core::units::format_number(r.target_value), r.target_unit.name.to_string())));
+            }
+            if self.scope != Scope::Files {
+                let usage = &self.usage;
+                let apps = &self.apps;
+                let recent = self.recent.lock().map(|r| r.clone()).unwrap_or_default();
+                let take = if self.scope == Scope::Apps { MAX_ITEMS } else { 6 };
+                let boost = |i: usize| usage.boost(&apps[i].name) + recent.get(&apps[i].name).copied().unwrap_or(0);
+                items.extend(livae_core::search::rank(q, &self.names, boost).into_iter().take(take).map(Item::App));
+                if self.scope == Scope::All {
+                    let ql = q.to_lowercase();
+                    if "settings".starts_with(&ql) || "preferences".starts_with(&ql) {
+                        items.push(Item::Settings);
+                    }
+                    if "clipboard".starts_with(&ql) {
+                        items.push(Item::Clipboard);
+                    }
+                }
+            }
+            let file_cap = if self.scope == Scope::Files { MAX_ITEMS } else { 6 };
+            items.extend(self.files.iter().take(file_cap).cloned().map(Item::File));
+            if self.searching && self.files.is_empty() && self.scope == Scope::Files {
+                items.push(Item::Searching);
+            }
+            if self.scope == Scope::All && !self.searching && !items.iter().any(|i| matches!(i, Item::Calc(_) | Item::Convert(..))) {
+                items.push(Item::Web(q.to_string()));
+            }
+            let maths = items.iter().any(|i| matches!(i, Item::Calc(_) | Item::Convert(..)));
+            if self.scope != Scope::Apps && !maths && !crate::access::folders_asked() {
+                items.push(Item::AllowFolders); // last, so Enter never starts system prompts by surprise
+            }
+            if items.is_empty() {
+                items.push(if self.searching { Item::Searching } else { Item::Empty });
+            }
+        }
+        items.truncate(MAX_ITEMS);
+        self.first = 0;
+        self.items = items;
+        self.selected = self.selected.min(self.items.len().saturating_sub(1));
+        self.layout();
+    }
+
+    /// Spotlight's index, off the main thread, after a short pause in typing; stale answers are dropped.
+    fn search_files(&self, q: String, ticket: u64) {
+        let counter = self.generation.clone();
+        let roots = config::get().roots();
+        let running = self.running.clone();
+        if let Some((_, mut old)) = running.lock().ok().and_then(|mut r| r.take()) {
+            let _ = old.kill();
+            let _ = old.wait();
+        }
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(120));
+            if counter.load(Ordering::SeqCst) != ticket {
+                return;
+            }
+            // Files you have opened in the last year first (Spotlight's own record), then any name match.
+            let clean: String = q.chars().filter(|c| !matches!(c, '"' | '*' | '\\' | '\'')).collect();
+            let kinds = "(kMDItemContentTypeTree == \"public.content\" || kMDItemContentTypeTree == \"public.folder\")";
+            let used = format!("kMDItemFSName == \"*{clean}*\"cd && kMDItemLastUsedDate >= $time.today(-365) && {kinds}");
+            let named = format!("kMDItemFSName == \"*{clean}*\"cd && {kinds}");
+            let mut queries: Vec<(bool, Vec<std::ffi::OsString>)> = Vec::new();
+            for root in &roots {
+                queries.push((true, vec!["-onlyin".into(), root.into(), used.clone().into()]));
+            }
+            for root in &roots {
+                queries.push((false, vec!["-onlyin".into(), root.into(), named.clone().into()]));
+            }
+            let mut found: Vec<(bool, PathBuf)> = Vec::new();
+            let mut seen = std::collections::HashSet::new();
+            for (recent, args) in queries {
+                let mut kept = 0;
+                let Ok(mut child) = std::process::Command::new("/usr/bin/mdfind")
+                    .args(&args)
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                else {
+                    continue;
+                };
+                let out = child.stdout.take();
+                {
+                    let Ok(mut slot) = running.lock() else { return };
+                    if counter.load(Ordering::SeqCst) != ticket {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return;
+                    }
+                    // Killing a newer search's process ends its read; ours replaces it.
+                    if let Some((_, mut old)) = slot.replace((ticket, child)) {
+                        let _ = old.kill();
+                        let _ = old.wait();
+                    }
+                }
+                if let Some(out) = out {
+                    for line in BufReader::new(out).lines().map_while(Result::ok) {
+                        let hidden = line.split('/').any(|part| part.starts_with('.') || NOISE.contains(&part)) || line.contains("/Library/");
+                        if !hidden && !line.ends_with(".app") && !line.contains(".app/") && seen.insert(line.clone()) {
+                            found.push((recent, PathBuf::from(line)));
+                            kept += 1;
+                        }
+                        if kept >= 60 || counter.load(Ordering::SeqCst) != ticket {
+                            break;
+                        }
+                    }
+                }
+                if let Ok(mut slot) = running.lock() {
+                    if slot.as_ref().is_some_and(|(t, _)| *t == ticket) {
+                        if let Some((_, mut c)) = slot.take() {
+                            let _ = c.kill();
+                            let _ = c.wait();
+                        }
+                    }
+                }
+                if counter.load(Ordering::SeqCst) != ticket {
+                    return;
+                }
+                if std::env::var_os("LIVAE_DEBUG").is_some() {
+                    eprintln!("mdfind recent={recent} kept={kept} args={args:?}");
+                }
+            }
+            // Opened before, then names that start with the query, then shorter paths.
+            let ql = q.to_lowercase();
+            found.sort_by_key(|(recent, p)| {
+                let name = p.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+                (!recent, !name.starts_with(&ql), !name.contains(&ql), p.components().count())
+            });
+            let mut found: Vec<PathBuf> = found.into_iter().map(|(_, p)| p).collect();
+            found.truncate(MAX_ITEMS / 2);
+            dispatch2::DispatchQueue::main().exec_async(move || with(|l| l.files_arrived(ticket, found)));
+        });
+    }
+
+    fn files_arrived(&mut self, ticket: u64, files: Vec<PathBuf>) {
+        if self.generation.load(Ordering::SeqCst) != ticket || !self.panel.isVisible() {
+            return;
+        }
+        self.searching = false;
+        self.files = files;
+        let q = self.field.stringValue().to_string();
+        self.rebuild(&q);
+    }
+
+    fn move_selection(&mut self, by: isize) {
+        if self.items.is_empty() {
+            return;
+        }
+        let n = self.items.len() as isize;
+        self.selected = ((self.selected as isize + by).rem_euclid(n)) as usize;
+        if self.selected < self.first {
+            self.first = self.selected;
+            self.layout();
+        } else if self.selected >= self.first + MAX_ROWS {
+            self.first = self.selected + 1 - MAX_ROWS;
+            self.layout();
+        } else {
+            self.paint_selection();
+        }
+    }
+
+    fn open_index(&mut self, i: usize) {
+        let Some(item) = self.items.get(i).cloned() else { return };
+        match item {
+            Item::Scope { scope, .. } => {
+                self.set_scope(scope);
+                self.field.setStringValue(ns_string!(""));
+                self.selected = 0;
+                self.query_changed();
+                self.panel.makeFirstResponder(Some(&self.field));
+            }
+            Item::AllowFolders => {
+                let q = self.field.stringValue().to_string();
+                PENDING_QUERY.with(|p| *p.borrow_mut() = q);
+                self.hide();
+                // Back to the same search once the prompts are answered, now with those folders.
+                crate::access::request_folders(|| {
+                    let q = PENDING_QUERY.with(|p| p.take());
+                    with(|l| {
+                        l.show();
+                        l.set_query(&q);
+                    });
+                });
+            }
+            Item::Clipboard => {
+                self.hide();
+                crate::clipboard::show();
+            }
+            Item::App(i) => {
+                let app = &self.apps[i];
+                self.usage.bump(&app.name);
+                NSWorkspace::sharedWorkspace().openURL(&NSURL::fileURLWithPath(&NSString::from_str(&app.path.to_string_lossy())));
+                self.hide();
+            }
+            Item::File(p) => {
+                self.usage.bump(&p.to_string_lossy());
+                NSWorkspace::sharedWorkspace().openURL(&NSURL::fileURLWithPath(&NSString::from_str(&p.to_string_lossy())));
+                self.hide();
+            }
+            Item::Convert(v, _) | Item::Calc(v) => {
+                let pb = NSPasteboard::generalPasteboard();
+                pb.clearContents();
+                pb.setString_forType(&NSString::from_str(&v), unsafe { NSPasteboardTypeString });
+                let f = self.panel.frame();
+                self.hide();
+                crate::hud::show(&format!("Copied {v}"), NSPoint::new(f.origin.x + WIDTH / 2.0, f.origin.y + f.size.height - FIELD_H / 2.0));
+            }
+            Item::Web(q) => {
+                let enc: String = q.bytes().map(|b| if b.is_ascii_alphanumeric() { (b as char).to_string() } else { format!("%{b:02X}") }).collect();
+                if let Some(url) = NSURL::URLWithString(&NSString::from_str(&format!("https://www.google.com/search?q={enc}"))) {
+                    NSWorkspace::sharedWorkspace().openURL(&url);
+                }
+                self.hide();
+            }
+            Item::Settings => {
+                self.hide();
+                crate::settings::show();
+            }
+            Item::Searching | Item::Empty => {}
+        }
+    }
+
+    fn icon_for(&mut self, path: &str) -> Retained<NSImage> {
+        if let Some(img) = self.icons.get(path) {
+            return img.clone();
+        }
+        let img = NSWorkspace::sharedWorkspace().iconForFile(&NSString::from_str(path));
+        self.icons.insert(path.to_string(), img.clone());
+        img
+    }
+
+    fn paint_selection(&self) {
+        let cmd = CMD.with(|c| c.get());
+        for (slot, row) in self.rows.iter().enumerate() {
+            let i = self.first + slot;
+            let item = self.items.get(i);
+            let selectable = !matches!(item, Some(Item::Empty | Item::Searching) | None);
+            let on = i == self.selected && selectable;
+            row.highlight.setHidden(!on);
+            let hint = if !selectable {
+                String::new()
+            } else if cmd {
+                format!("⌘{}", slot + 1)
+            } else {
+                String::new()
+            };
+            row.hint.setStringValue(&NSString::from_str(&hint));
+        }
+    }
+
+    /// Size the window to the capsule plus the card (top edge fixed) and place every view.
+    fn layout(&mut self) {
+        let n = self.items.len().saturating_sub(self.first).min(MAX_ROWS);
+        let card_h = if n > 0 { INSET + n as f64 * ROW_H + INSET } else { 0.0 };
+        self.card_h = card_h;
+        let h = FIELD_H + if n > 0 { GAP + card_h } else { 0.0 };
+        let mut frame = self.panel.frame();
+        frame.size = NSSize::new(WIDTH, h);
+        frame.origin.y = self.top - h;
+        self.panel.setFrame_display(frame, true);
+        self.capsule.root.setFrame(NSRect::new(NSPoint::new(0.0, h - FIELD_H), NSSize::new(WIDTH, FIELD_H)));
+        self.card.root.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(WIDTH, card_h)));
+        self.card.root.setHidden(n == 0);
+        self._list.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(WIDTH, card_h)));
+
+        let home = config::home().to_string_lossy().to_string();
+        let tint = ui::rgb(SECONDARY);
+        let mut file_rows: Vec<(usize, f64, f64)> = Vec::new(); // (slot, name width, y)
+        for slot in 0..self.rows.len() {
+            let shown = slot < n;
+            {
+                let row = &self.rows[slot];
+                for v in [&*row.highlight as &NSView, &row.icon, &row.title, &row.detail, &row.hint] {
+                    v.setHidden(!shown);
+                }
+            }
+            if !shown {
+                continue;
+            }
+            let y = card_h - INSET - (slot as f64 + 1.0) * ROW_H;
+            let item = self.items[self.first + slot].clone();
+            let (title, detail, image, template): (String, String, Option<Retained<NSImage>>, bool) = match &item {
+                Item::Scope { title, .. } => (title.to_string(), String::new(), None, true),
+                Item::Clipboard => ("Clipboard".to_string(), String::new(), None, true),
+                Item::App(i) => {
+                    let p = self.apps[*i].path.to_string_lossy().to_string();
+                    (self.apps[*i].name.clone(), String::new(), Some(self.icon_for(&p)), false)
+                }
+                Item::File(p) => {
+                    let ps = p.to_string_lossy().to_string();
+                    let parent = p.parent().map(|d| d.to_string_lossy().replacen(&home, "~", 1)).unwrap_or_default();
+                    (p.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default(), parent, Some(self.icon_for(&ps)), false)
+                }
+                Item::Calc(v) => (v.clone(), String::new(), None, true),
+                Item::Convert(v, unit) => (format!("{v} {unit}"), String::new(), None, true),
+                Item::Web(_) => ("Search the web".to_string(), String::new(), None, true),
+                Item::Settings => ("Settings".to_string(), String::new(), None, true),
+                Item::AllowFolders => ("Include Desktop, Documents and Downloads".to_string(), String::new(), None, true),
+                Item::Searching => ("Searching files…".to_string(), String::new(), None, true),
+                Item::Empty => (
+                    if self.field.stringValue().length() == 0 {
+                        "Type a file name".to_string()
+                    } else if self.scope == Scope::Files {
+                        format!("No file names match \u{201c}{}\u{201d}", self.field.stringValue())
+                    } else {
+                        "No matches".to_string()
+                    },
+                    if self.scope == Scope::All { String::new() } else { "⌫ back to everything".to_string() },
+                    None,
+                    true,
+                ),
+            };
+            let quiet = matches!(item, Item::Empty | Item::Searching);
+            let row = &self.rows[slot];
+            row.highlight.setFrame(NSRect::new(NSPoint::new(INSET, y), NSSize::new(WIDTH - 2.0 * INSET, ROW_H)));
+            let (isz, ix, iy) = if template { (20.0, EDGE + 6.0, y + 12.0) } else { (26.0, EDGE + 3.0, y + 9.0) };
+            row.icon.setFrame(NSRect::new(NSPoint::new(ix, iy), NSSize::new(isz, isz)));
+            row.icon.setHidden(image.is_none());
+            row.icon.setImage(image.as_deref());
+            row.icon.setContentTintColor(if template { Some(&*tint) } else { None });
+            row.title.setTextColor(Some(&ui::rgb(if quiet { TERTIARY } else { TEXT })));
+            let answer = matches!(item, Item::Calc(_) | Item::Convert(..));
+            let font = if answer {
+                objc2_app_kit::NSFont::systemFontOfSize_weight(24.0, unsafe { objc2_app_kit::NSFontWeightSemibold })
+            } else {
+                objc2_app_kit::NSFont::systemFontOfSize(16.0)
+            };
+            row.title.setFont(Some(&font));
+            row.title.setStringValue(&NSString::from_str(&title));
+            row.title.sizeToFit();
+            // Files: names in one column, folders aligned in a second one.
+            let is_file = matches!(item, Item::File(_));
+            let cap = if is_file { 420.0 } else { WIDTH - TEXT_X - EDGE - 70.0 };
+            let title_w = row.title.frame().size.width.min(cap);
+            let (ty, th) = if answer { (y + 7.0, 30.0) } else { (y + 11.0, 22.0) };
+            row.title.setFrame(NSRect::new(NSPoint::new(TEXT_X, ty), NSSize::new(title_w, th)));
+            row.title.setLineBreakMode(if is_file { objc2_app_kit::NSLineBreakMode::ByTruncatingMiddle } else { objc2_app_kit::NSLineBreakMode::ByTruncatingTail });
+            let detail_x = if is_file { TEXT_X + 262.0 } else { TEXT_X + title_w + 12.0 };
+            row.detail.setLineBreakMode(if is_file { objc2_app_kit::NSLineBreakMode::ByTruncatingHead } else { objc2_app_kit::NSLineBreakMode::ByTruncatingTail });
+            row.detail.setFrame(NSRect::new(NSPoint::new(detail_x, y + 13.0), NSSize::new((WIDTH - EDGE - 52.0 - detail_x).max(0.0), 18.0)));
+            row.detail.setStringValue(&NSString::from_str(&detail));
+            row.hint.setFrame(NSRect::new(NSPoint::new(WIDTH - EDGE - 44.0, y + 13.0), NSSize::new(44.0, 18.0)));
+            if is_file {
+                file_rows.push((slot, title_w, y));
+            }
+        }
+        if let Some(col) = file_rows.iter().map(|r| r.1).reduce(f64::max) {
+            let detail_x = TEXT_X + col + 16.0;
+            for (slot, _, y) in file_rows {
+                self.rows[slot].detail.setFrame(NSRect::new(NSPoint::new(detail_x, y + 13.0), NSSize::new((WIDTH - EDGE - 52.0 - detail_x).max(0.0), 18.0)));
+            }
+        }
+        self.paint_selection();
+    }
+}

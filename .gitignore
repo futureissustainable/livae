@@ -1,0 +1,8 @@
+/target/
+_scratch/
+dist/
+*.xpi
+.DS_Store
+Thumbs.db
+# Working notes of the author's own setup (machines, schedules); not part of the project.
+PLAN.md
