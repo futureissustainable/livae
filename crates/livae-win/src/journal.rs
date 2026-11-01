@@ -21,7 +21,7 @@ use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows::Win32::Graphics::DirectWrite::{DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_WEIGHT_NORMAL};
 use windows::Win32::Graphics::Gdi::{
-    CreateCompatibleDC, CreateDIBSection, CreateFontW, DeleteDC, DeleteObject, DrawTextW, GetDC, GetStockObject, GetTextFaceW, InvalidateRect,
+    AddFontMemResourceEx, CreateCompatibleDC, CreateDIBSection, CreateFontW, DeleteDC, DeleteObject, DrawTextW, GetDC, GetStockObject, GetTextFaceW, InvalidateRect,
     ReleaseDC, SelectObject, SetBkColor, SetBkMode, SetTextColor, AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
     BLACK_BRUSH, BLENDFUNCTION, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH, DIB_RGB_COLORS, DT_NOPREFIX,
     DT_WORDBREAK, FW_NORMAL, HDC, HFONT, HGDIOBJ, OUT_DEFAULT_PRECIS, TRANSPARENT,
@@ -275,19 +275,27 @@ fn note_font(scale: f32) -> HFONT {
             &face,
         )
     };
-    // Windows 11's Segoe UI Variable when GDI has it, else Segoe UI.
-    let font = make("Segoe UI Variable Text");
-    unsafe {
-        let dc = GetDC(None);
-        let old = SelectObject(dc, HGDIOBJ(font.0));
-        let mut name = [0u16; 64];
-        let n = GetTextFaceW(dc, Some(&mut name)).max(0) as usize;
-        SelectObject(dc, old);
-        ReleaseDC(None, dc);
-        if String::from_utf16_lossy(&name[..n.min(64)]).trim_end_matches('\0') == "Segoe UI Variable Text" {
-            return font;
+    // Livae Sans (added to this process only, from the exe), else Windows 11's Segoe UI Variable, else Segoe UI.
+    static ADDED: std::sync::Once = std::sync::Once::new();
+    ADDED.call_once(|| unsafe {
+        let regular = crate::glass::LIVAE_SANS[0];
+        let mut count = 0u32;
+        let _ = AddFontMemResourceEx(regular.as_ptr() as *const std::ffi::c_void, regular.len() as u32, None, &mut count);
+    });
+    for face in ["Livae Sans", "Segoe UI Variable Text"] {
+        let font = make(face);
+        unsafe {
+            let dc = GetDC(None);
+            let old = SelectObject(dc, HGDIOBJ(font.0));
+            let mut name = [0u16; 64];
+            let n = GetTextFaceW(dc, Some(&mut name)).max(0) as usize;
+            SelectObject(dc, old);
+            ReleaseDC(None, dc);
+            if String::from_utf16_lossy(&name[..n.min(64)]).trim_end_matches('\0') == face {
+                return font;
+            }
+            let _ = DeleteObject(HGDIOBJ(font.0));
         }
-        let _ = DeleteObject(HGDIOBJ(font.0));
     }
     make("Segoe UI")
 }

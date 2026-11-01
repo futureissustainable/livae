@@ -271,7 +271,7 @@ fn rect(x: f64, y: f64, w: f64, h: f64) -> NSRect {
 }
 
 fn font(size: f64, medium: bool) -> Retained<NSFont> {
-    if medium { NSFont::systemFontOfSize_weight(size, unsafe { NSFontWeightMedium }) } else { NSFont::systemFontOfSize(size) }
+    if medium { crate::font::sans(size, unsafe { NSFontWeightMedium }) } else { crate::font::regular(size) }
 }
 
 fn styled(text: &str, font: &NSFont, color: &NSColor, para: Option<&NSMutableParagraphStyle>) -> Retained<NSAttributedString> {

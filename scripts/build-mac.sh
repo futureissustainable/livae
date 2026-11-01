@@ -12,6 +12,7 @@ VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 rm -rf "$APP.new"
 mkdir -p "$APP.new/Contents/MacOS" "$APP.new/Contents/Resources"
 cp assets/Livae.icns "$APP.new/Contents/Resources/Livae.icns"
+mkdir -p "$APP.new/Contents/Resources/Fonts" && cp assets/fonts/LivaeSans-*.ttf "$APP.new/Contents/Resources/Fonts/"   # Livae Sans (OFL)
 cp "$CARGO_TARGET_DIR/release/livae" "$APP.new/Contents/MacOS/Livae"
 cat > "$APP.new/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -28,6 +29,7 @@ cat > "$APP.new/Contents/Info.plist" <<PLIST
   <key>NSHumanReadableCopyright</key><string>Livae. App discovery ideas from RustCast (MIT).</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
+  <key>ATSApplicationFontsPath</key><string>Fonts</string>
 </dict></plist>
 PLIST
 # Sign with the local "Livae Local Signing" certificate (its own keychain), so macOS keeps the Accessibility

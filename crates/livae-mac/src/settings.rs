@@ -10,7 +10,7 @@ use objc2::runtime::AnyObject;
 use objc2::{define_class, msg_send, sel, MainThreadOnly};
 use objc2_app_kit::{
     NSAppearance, NSAppearanceCustomization, NSAppearanceNameDarkAqua, NSApplication, NSButton, NSColor, NSControlStateValueOff,
-    NSControlStateValueOn, NSEvent, NSEventMask, NSEventModifierFlags, NSFont, NSLineBreakMode, NSOpenPanel, NSPopUpButton, NSSlider, NSSwitch,
+    NSControlStateValueOn, NSEvent, NSEventMask, NSEventModifierFlags, NSLineBreakMode, NSOpenPanel, NSPopUpButton, NSSlider, NSSwitch,
     NSTextAlignment, NSTextField, NSView, NSWindow, NSWindowTitleVisibility, NSScrollView, NSScreen,
 };
 use objc2::runtime::ProtocolObject;
@@ -285,7 +285,7 @@ fn rgb(c: [u8; 3]) -> Retained<NSColor> {
 
 fn text(mtm: MainThreadMarker, s: &str, size: f64, color: [u8; 3]) -> Retained<NSTextField> {
     let t = NSTextField::labelWithString(&NSString::from_str(s), mtm);
-    t.setFont(Some(&NSFont::systemFontOfSize(size)));
+    t.setFont(Some(&crate::font::regular(size)));
     t.setTextColor(Some(&rgb(color)));
     t.setLineBreakMode(NSLineBreakMode::ByTruncatingMiddle);
     t
@@ -482,7 +482,7 @@ fn build(mtm: MainThreadMarker) {
 
     let mut y = h - TITLEBAR - 28.0;
     let title = text(mtm, "Settings", 20.0, tokens::color::dark::TEXT);
-    title.setFont(Some(&NSFont::systemFontOfSize_weight(20.0, unsafe { objc2_app_kit::NSFontWeightMedium })));
+    title.setFont(Some(&crate::font::sans(20.0, unsafe { objc2_app_kit::NSFontWeightMedium })));
     title.setFrame(NSRect::new(NSPoint::new(PAD, y), NSSize::new(200.0, 26.0)));
     v.addSubview(&title);
     let version = text(mtm, concat!("Livae ", env!("CARGO_PKG_VERSION")), 14.0, tokens::color::dark::TEXT_SECONDARY);
@@ -492,7 +492,7 @@ fn build(mtm: MainThreadMarker) {
     let section = |name: &str, y: &mut f64| {
         *y -= SECTION;
         let t = text(mtm, name, 14.0, tokens::color::dark::TEXT);
-        t.setFont(Some(&NSFont::systemFontOfSize_weight(14.0, unsafe { objc2_app_kit::NSFontWeightMedium })));
+        t.setFont(Some(&crate::font::sans(14.0, unsafe { objc2_app_kit::NSFontWeightMedium })));
         t.setFrame(NSRect::new(NSPoint::new(PAD, *y + 4.0), NSSize::new(300.0, 18.0)));
         v.addSubview(&t);
     };

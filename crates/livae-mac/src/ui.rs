@@ -27,7 +27,7 @@ pub fn white(alpha: f64) -> Retained<NSColor> {
 
 pub fn label(mtm: MainThreadMarker, size: f64, color: [u8; 3]) -> Retained<NSTextField> {
     let t = NSTextField::labelWithString(ns_string!(""), mtm);
-    t.setFont(Some(&NSFont::systemFontOfSize(size)));
+    t.setFont(Some(&crate::font::regular(size)));
     t.setTextColor(Some(&rgb(color)));
     t.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
     t
@@ -67,7 +67,7 @@ pub fn search_field(mtm: MainThreadMarker, controller: &Controller, hint: &str, 
     field.setBezeled(false);
     field.setDrawsBackground(false);
     field.setFocusRingType(NSFocusRingType::None);
-    let font = NSFont::systemFontOfSize(size);
+    let font = crate::font::regular(size);
     field.setFont(Some(&font));
     field.setTextColor(Some(&rgb(TEXT)));
     field.setPlaceholderAttributedString(Some(&placeholder(hint, &font)));

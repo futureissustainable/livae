@@ -61,6 +61,8 @@ cargo build --release -p livae-win --target x86_64-pc-windows-gnu
 
 - App discovery and unit-conversion ideas from [RustCast](https://github.com/MystikoLab/rustcast) (MIT, see
   `THIRD_PARTY_RUSTCAST_LICENSE.md`).
+- Livae Sans, the app's typeface (SIL Open Font License, `assets/fonts/OFL.txt`), is a modified version of Host Grotesk,
+  Geist, Schibsted Grotesk, Inter Tight, Archivo and Funnel Sans, all under the same licence.
 - Zen Gate shows digits in [Departure Mono](https://departuremono.com) (SIL Open Font License).
 
 ## Licence

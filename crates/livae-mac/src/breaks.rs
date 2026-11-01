@@ -431,7 +431,7 @@ fn unix_now() -> f64 {
 fn quiet_button(mtm: MainThreadMarker, title: &str, action: Sel, target: &Target) -> Retained<NSButton> {
     let b = unsafe { NSButton::buttonWithTitle_target_action(&NSString::from_str(title), Some(target as &AnyObject), Some(action), mtm) };
     b.setBordered(false);
-    let font = NSFont::systemFontOfSize_weight(text::LABEL.size, unsafe { NSFontWeightMedium });
+    let font = crate::font::sans(text::LABEL.size, unsafe { NSFontWeightMedium });
     b.setAttributedTitle(&styled(title, &font, SECONDARY, text::LABEL.leading));
     b.sizeToFit();
     b
@@ -480,7 +480,7 @@ fn build(mtm: MainThreadMarker, frame: NSRect, b: &Break, quote: &Quote, skip: b
     // The quote with the owner's line breaks, and its author.
     let column = ui::fit(w - 2.0 * tokens::space::S12, tokens::space::S32 * 2.0, MEASURE);
     let x = ((w - column) / 2.0).round();
-    let font = NSFont::systemFontOfSize_weight(QUOTE, unsafe { NSFontWeightRegular });
+    let font = crate::font::sans(QUOTE, unsafe { NSFontWeightRegular });
     let words = NSTextField::wrappingLabelWithString(ns_string!(""), mtm);
     words.setSelectable(false);
     words.setLineBreakMode(NSLineBreakMode::ByWordWrapping);
@@ -518,7 +518,7 @@ fn build(mtm: MainThreadMarker, frame: NSRect, b: &Break, quote: &Quote, skip: b
     let mut row_top = line_y;
     let time = b.long.then(|| {
         let t = ui::label(mtm, text::LABEL.size, SECONDARY);
-        t.setFont(Some(&NSFont::monospacedDigitSystemFontOfSize_weight(text::LABEL.size, unsafe { NSFontWeightRegular })));
+        t.setFont(Some(&crate::font::digits(text::LABEL.size, unsafe { NSFontWeightRegular })));
         t.setAlignment(NSTextAlignment::Center);
         t.setStringValue(&NSString::from_str(&breaks::minutes_seconds(b.seconds)));
         row_top = line_y - TIME_GAP - row_h;

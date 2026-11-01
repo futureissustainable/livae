@@ -28,6 +28,41 @@ pub fn rank<S: AsRef<str>>(query: &str, items: &[S], boost: impl Fn(usize) -> u3
     hits.into_iter().map(|(_, i)| i).collect()
 }
 
+/// Like `rank`, for items with hidden search words: `(name, words)`. The name counts first (an exact name beats a
+/// name that starts with the query, which beats one that merely contains it); the words only find an item whose name
+/// does not match ("wifi" finds Wi-Fi, "dark mode" finds Colors). Ties go to the shorter name.
+pub fn rank_words<N: AsRef<str>, W: AsRef<str>>(query: &str, items: &[(N, W)], boost: impl Fn(usize) -> u32) -> Vec<usize> {
+    let query = query.trim();
+    if query.is_empty() {
+        return (0..items.len()).collect();
+    }
+    let ql = query.to_lowercase();
+    let mut matcher = Matcher::new(Config::DEFAULT);
+    let pattern = Pattern::new(query, CaseMatching::Ignore, Normalization::Smart, AtomKind::Fuzzy);
+    // The hidden words must contain every typed word as written: fuzzy matching there let "chrome" find Display.
+    let exact = Pattern::new(query, CaseMatching::Ignore, Normalization::Smart, AtomKind::Substring);
+    let mut buf = Vec::new();
+    let mut hits: Vec<(u32, usize)> = items
+        .iter()
+        .enumerate()
+        .filter_map(|(i, (name, words))| {
+            let (name, words) = (name.as_ref(), words.as_ref());
+            let lower = name.to_lowercase();
+            let by_name = pattern.score(Utf32Str::new(name, &mut buf), &mut matcher).map(|s| {
+                s + if lower == ql { 400 } else if lower.starts_with(&ql) { 200 } else { 0 }
+            });
+            let score = match by_name {
+                Some(s) => s,
+                None if words.is_empty() => return None,
+                None => exact.score(Utf32Str::new(words, &mut buf), &mut matcher)?,
+            };
+            Some((score + boost(i), i))
+        })
+        .collect();
+    hits.sort_by(|a, b| b.0.cmp(&a.0).then(items[a.1].0.as_ref().len().cmp(&items[b.1].0.as_ref().len())));
+    hits.into_iter().map(|(_, i)| i).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::rank;

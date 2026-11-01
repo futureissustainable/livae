@@ -6,7 +6,7 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{define_class, msg_send, sel, MainThreadOnly};
 use objc2_app_kit::{
-    NSAppearance, NSAppearanceCustomization, NSAppearanceNameDarkAqua, NSApplication, NSButton, NSColor, NSFont,
+    NSAppearance, NSAppearanceCustomization, NSAppearanceNameDarkAqua, NSApplication, NSButton, NSColor,
     NSImage, NSImageView, NSTextAlignment, NSTextField, NSWindow, NSWindowTitleVisibility,
 };
 use objc2_foundation::{ns_string, MainThreadMarker, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
@@ -90,7 +90,7 @@ pub fn refresh() {
 
 fn line(mtm: MainThreadMarker, v: &objc2_app_kit::NSView, y: f64, title: &str, body: &str) {
     let t = ui::label(mtm, 16.0, TEXT);
-    t.setFont(Some(&NSFont::systemFontOfSize_weight(16.0, unsafe { objc2_app_kit::NSFontWeightMedium })));
+    t.setFont(Some(&crate::font::sans(16.0, unsafe { objc2_app_kit::NSFontWeightMedium })));
     t.setStringValue(&NSString::from_str(title));
     t.setFrame(NSRect::new(NSPoint::new(PAD, y + 22.0), NSSize::new(250.0, 22.0)));
     v.addSubview(&t);
@@ -152,7 +152,7 @@ fn build(mtm: MainThreadMarker) {
     icon.setFrame(NSRect::new(NSPoint::new(PAD - 6.0, H - 104.0), NSSize::new(64.0, 64.0)));
     v.addSubview(&icon);
     let title = ui::label(mtm, 28.0, TEXT);
-    title.setFont(Some(&NSFont::systemFontOfSize_weight(28.0, unsafe { objc2_app_kit::NSFontWeightSemibold })));
+    title.setFont(Some(&crate::font::sans(28.0, unsafe { objc2_app_kit::NSFontWeightSemibold })));
     title.setStringValue(ns_string!("Livae"));
     // Centred on the icon; the rows below say what Livae does, so no tagline.
     title.setFrame(NSRect::new(NSPoint::new(PAD + 70.0, H - 89.0), NSSize::new(250.0, 34.0)));

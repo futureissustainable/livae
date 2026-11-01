@@ -812,9 +812,9 @@ impl Launcher {
             row.title.setTextColor(Some(&ui::rgb(if quiet { TERTIARY } else { TEXT })));
             let answer = matches!(item, Item::Calc(_) | Item::Convert(..));
             let font = if answer {
-                objc2_app_kit::NSFont::systemFontOfSize_weight(24.0, unsafe { objc2_app_kit::NSFontWeightSemibold })
+                crate::font::sans(24.0, unsafe { objc2_app_kit::NSFontWeightSemibold })
             } else {
-                objc2_app_kit::NSFont::systemFontOfSize(16.0)
+                crate::font::regular(16.0)
             };
             row.title.setFont(Some(&font));
             row.title.setStringValue(&NSString::from_str(&title));

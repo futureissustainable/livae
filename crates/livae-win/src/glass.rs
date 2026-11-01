@@ -13,7 +13,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use windows::core::{w, PCWSTR};
+use windows::core::{w, Interface, PCWSTR};
 use windows::Win32::Foundation::{D2DERR_RECREATE_TARGET, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_GRADIENT_STOP, D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_U,
@@ -27,7 +27,8 @@ use windows::Win32::Graphics::Direct2D::{
     ID2D1StrokeStyle,
 };
 use windows::Win32::Graphics::DirectWrite::{
-    DWriteCreateFactory, IDWriteFactory, IDWriteFontCollection, IDWriteTextFormat, IDWriteTextLayout, DWRITE_FACTORY_TYPE_SHARED,
+    DWriteCreateFactory, IDWriteFactory, IDWriteFactory5, IDWriteFontCollection, IDWriteFontCollection1, IDWriteTextFormat, IDWriteTextLayout,
+    DWRITE_FACTORY_TYPE_SHARED,
     DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT, DWRITE_HIT_TEST_METRICS, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
     DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_TEXT_METRICS, DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_WORD_WRAPPING_NO_WRAP,
     DWRITE_WORD_WRAPPING_WRAP,
@@ -122,6 +123,8 @@ pub struct Gfx {
     pub d2d: ID2D1Factory,
     pub dw: IDWriteFactory,
     families: HashMap<Font, Vec<u16>>,
+    /// Livae Sans, loaded from the exe (never installed); the sans and display text use it when present.
+    livae: Option<IDWriteFontCollection>,
     formats: RefCell<HashMap<(Font, u32, i32, bool, bool), IDWriteTextFormat>>,
 }
 
@@ -131,6 +134,31 @@ thread_local! {
 
 pub fn gfx() -> &'static Gfx {
     GFX.with(|g| *g)
+}
+
+/// Livae Sans (SIL Open Font License, assets/fonts): Regular, Medium, SemiBold and Bold, built into the exe.
+pub const LIVAE_SANS: [&[u8]; 4] = [
+    include_bytes!("../../../assets/fonts/LivaeSans-Regular.ttf"),
+    include_bytes!("../../../assets/fonts/LivaeSans-Medium.ttf"),
+    include_bytes!("../../../assets/fonts/LivaeSans-SemiBold.ttf"),
+    include_bytes!("../../../assets/fonts/LivaeSans-Bold.ttf"),
+];
+
+/// The four Livae Sans faces as a private DirectWrite collection read from memory (Windows 10 1703 and later).
+fn livae_collection(dw: &IDWriteFactory) -> Option<IDWriteFontCollection> {
+    unsafe {
+        let f5: IDWriteFactory5 = dw.cast().ok()?;
+        let loader = f5.CreateInMemoryFontFileLoader().ok()?;
+        f5.RegisterFontFileLoader(&loader).ok()?;
+        let builder = f5.CreateFontSetBuilder().ok()?;
+        for bytes in LIVAE_SANS {
+            let file = loader.CreateInMemoryFontFileReference(&f5, bytes.as_ptr() as *const std::ffi::c_void, bytes.len() as u32, None).ok()?;
+            builder.AddFontFile(&file).ok()?;
+        }
+        let set = builder.CreateFontSet().ok()?;
+        let all: IDWriteFontCollection1 = f5.CreateFontCollectionFromFontSet(&set).ok()?;
+        all.cast().ok()
+    }
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -157,12 +185,18 @@ impl Gfx {
                 }
                 wide(names[names.len() - 1])
             };
+            let livae = livae_collection(&dw);
             let mut families = HashMap::new();
-            families.insert(Font::Sans, pick(&["Segoe UI Variable Text", "Segoe UI"]));
-            families.insert(Font::Display, pick(&["Segoe UI Variable Display", "Segoe UI"]));
+            if livae.is_some() {
+                families.insert(Font::Sans, wide("Livae Sans"));
+                families.insert(Font::Display, wide("Livae Sans"));
+            } else {
+                families.insert(Font::Sans, pick(&["Segoe UI Variable Text", "Segoe UI"]));
+                families.insert(Font::Display, pick(&["Segoe UI Variable Display", "Segoe UI"]));
+            }
             families.insert(Font::Mono, pick(&["Cascadia Mono", "Consolas"]));
             families.insert(Font::Icons, pick(&["Segoe Fluent Icons", "Segoe MDL2 Assets"]));
-            Self { d2d, dw, families, formats: RefCell::new(HashMap::new()) }
+            Self { d2d, dw, families, livae, formats: RefCell::new(HashMap::new()) }
         }
     }
 
@@ -173,11 +207,13 @@ impl Gfx {
             return f.clone();
         }
         let f = unsafe {
-            let family = &self.families[&font];
-            let f = self
-                .dw
-                .CreateTextFormat(PCWSTR(family.as_ptr()), None, weight, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, size, w!("en-us"))
-                .expect("text format");
+            let family = PCWSTR(self.families[&font].as_ptr());
+            let (style, stretch) = (DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL);
+            let f = match (&self.livae, font) {
+                (Some(livae), Font::Sans | Font::Display) => self.dw.CreateTextFormat(family, livae, weight, style, stretch, size, w!("en-us")),
+                _ => self.dw.CreateTextFormat(family, None, weight, style, stretch, size, w!("en-us")),
+            }
+            .expect("text format");
             let _ = f.SetWordWrapping(if wrap { DWRITE_WORD_WRAPPING_WRAP } else { DWRITE_WORD_WRAPPING_NO_WRAP });
             let _ = f.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
             if right {
@@ -741,7 +777,7 @@ fn screen_pixels(x: i32, y: i32, w: i32, h: i32) -> Option<Vec<u8>> {
             },
             ..Default::default()
         };
-        let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
+        let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
         let out = match CreateDIBSection(Some(mem), &info, DIB_RGB_COLORS, &mut bits, None, 0) {
             Ok(dib) if !bits.is_null() => {
                 let old = SelectObject(mem, dib.into());

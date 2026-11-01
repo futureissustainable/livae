@@ -8,6 +8,7 @@ pub mod journal;
 pub mod search;
 pub mod settings;
 pub mod shortcut;
+pub mod system_settings;
 pub mod tokens;
 pub mod units;
 pub mod usage;

@@ -774,14 +774,14 @@ impl Clipboard {
                 let msg = if self.clips.is_empty() { "Nothing copied yet".to_string() } else { format!("No copied item matches \u{201c}{}\u{201d}", q.trim()) };
                 row.title.setStringValue(&NSString::from_str(&msg));
                 row.title.setTextColor(Some(&ui::rgb(TERTIARY)));
-                row.title.setFont(Some(&NSFont::systemFontOfSize(16.0)));
+                row.title.setFont(Some(&crate::font::regular(16.0)));
                 row.title.setFrame(NSRect::new(NSPoint::new(TEXT_X, mid - 11.0), NSSize::new(WIDTH - TEXT_X - EDGE, 22.0)));
                 continue;
             }
             let clip = &self.clips[visible[slot]];
             let clip = Clip { text: clip.text.chars().take(400).collect(), ..clip.clone_meta() };
             row.title.setTextColor(Some(&ui::rgb(TEXT)));
-            let font = if clip.kind == Kind::Code { NSFont::monospacedSystemFontOfSize_weight(14.0, 0.0) } else { NSFont::systemFontOfSize(16.0) };
+            let font = if clip.kind == Kind::Code { NSFont::monospacedSystemFontOfSize_weight(14.0, 0.0) } else { crate::font::regular(16.0) };
             row.title.setFont(Some(&font));
             row.time.setHidden(false);
             row.time.setStringValue(&NSString::from_str(&ago(clip.time)));

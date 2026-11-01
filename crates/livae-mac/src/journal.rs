@@ -629,11 +629,11 @@ fn toggle_habit(index: usize) {
 }
 
 fn medium(size: f64) -> Retained<NSFont> {
-    NSFont::systemFontOfSize_weight(size, unsafe { NSFontWeightMedium })
+    crate::font::sans(size, unsafe { NSFontWeightMedium })
 }
 
 fn regular(size: f64) -> Retained<NSFont> {
-    NSFont::systemFontOfSize(size)
+    crate::font::regular(size)
 }
 
 fn styled(text: &str, font: &NSFont, color: &NSColor, centred: bool) -> Retained<NSAttributedString> {
@@ -1319,7 +1319,7 @@ fn build(mtm: MainThreadMarker) -> Ui {
     editor.addSubview(&field);
 
     // Footer, right: the quiet dismiss text (titled per mode in `prepare`), the counter, the Save pill.
-    let digits = NSFont::monospacedDigitSystemFontOfSize_weight(tokens::text::LABEL.size, unsafe { NSFontWeightRegular });
+    let digits = crate::font::digits(tokens::text::LABEL.size, unsafe { NSFontWeightRegular });
     let count = text_label(mtm, "", &digits, SECONDARY, v);
     count.setAlignment(NSTextAlignment::Right);
     let count_w = styled("000 / 90", &digits, &ui::rgb(TEXT), false).size().width.ceil() + 2.0;

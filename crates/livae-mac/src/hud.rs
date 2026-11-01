@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use objc2::rc::Retained;
 use objc2::MainThreadOnly;
 use objc2_app_kit::{
-    NSAppearance, NSAppearanceCustomization, NSAppearanceNameDarkAqua, NSBackingStoreType, NSColor, NSFont, NSPanel, NSStatusWindowLevel,
+    NSAppearance, NSAppearanceCustomization, NSAppearanceNameDarkAqua, NSBackingStoreType, NSColor, NSPanel, NSStatusWindowLevel,
     NSTextAlignment, NSTextField, NSWindowCollectionBehavior, NSWindowStyleMask,
 };
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize, NSString};
@@ -47,7 +47,7 @@ fn build(mtm: MainThreadMarker) -> Hud {
     panel.setAppearance(NSAppearance::appearanceNamed(unsafe { NSAppearanceNameDarkAqua }).as_deref());
     let glass = Glass::new(mtm, H / 2.0, 1.0);
     let label = ui::label(mtm, 14.0, TEXT);
-    label.setFont(Some(&NSFont::systemFontOfSize_weight(14.0, unsafe { objc2_app_kit::NSFontWeightMedium })));
+    label.setFont(Some(&crate::font::sans(14.0, unsafe { objc2_app_kit::NSFontWeightMedium })));
     label.setAlignment(NSTextAlignment::Center);
     glass.content.addSubview(&label);
     panel.setContentView(Some(&glass.root));

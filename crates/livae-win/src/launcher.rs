@@ -51,6 +51,18 @@ pub struct App {
     pub launch: String,
     /// The shortcut file, for Ctrl+Enter.
     pub path: Option<PathBuf>,
+    /// Settings pages and system tools: arguments for `launch`, the kind shown beside the name, hidden search words,
+    /// and where the icon comes from.
+    pub args: Option<&'static str>,
+    pub detail: &'static str,
+    pub keywords: &'static str,
+    pub icon: Option<String>,
+}
+
+impl App {
+    fn new(name: String, launch: String, path: Option<PathBuf>) -> App {
+        App { name, launch, path, args: None, detail: "", keywords: "", icon: None }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -134,7 +146,8 @@ fn usage_file() -> PathBuf {
 }
 
 pub fn install() {
-    let apps = scan_start_menu();
+    let mut apps = scan_start_menu();
+    add_system(&mut apps);
     let names = apps.iter().map(|a| a.name.clone()).collect();
     let l = Launcher {
         panel: Panel::new(glass::LAUNCHER_FIELD, glass::LAUNCHER_CARD, WIDTH, FIELD_H),
@@ -311,7 +324,7 @@ fn scan_start_menu() -> Vec<App> {
             if is_noise_app(&name) || !seen.insert(name.to_lowercase()) {
                 continue;
             }
-            out.push(App { name, launch: p.to_string_lossy().to_string(), path: Some(p) });
+            out.push(App::new(name, p.to_string_lossy().to_string(), Some(p)));
         }
     }
     out
@@ -330,10 +343,34 @@ fn scan_all() -> Vec<App> {
         if is_noise_app(&name) || !seen.insert(name.to_lowercase()) {
             continue;
         }
-        apps.push(App { name, launch: format!("shell:AppsFolder\\{id}"), path: None });
+        apps.push(App::new(name, format!("shell:AppsFolder\\{id}"), None));
+    }
+    add_system(&mut apps);
+    apps
+}
+
+/// Settings pages, Control Panel applets and system tools (livae-core's table), after the apps so an app with the
+/// same name wins; tools this edition of Windows lacks (gpedit.msc on Home) are left out.
+fn add_system(apps: &mut Vec<App>) {
+    const SETTINGS_APP: &str = "shell:AppsFolder\\windows.immersivecontrolpanel_cw5n1h2txyewy!microsoft.windows.immersivecontrolpanel";
+    const CONTROL_PANEL: &str = "shell:AppsFolder\\Microsoft.Windows.ControlPanel";
+    let sys = PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into())).join("System32");
+    let mut seen: HashSet<String> = apps.iter().map(|a| a.name.to_lowercase()).collect();
+    for it in livae_core::system_settings::WINDOWS {
+        let program = !it.target.contains(':');
+        if (program && !sys.join(it.target).exists()) || !seen.insert(it.name.to_lowercase()) {
+            continue;
+        }
+        let icon = match (program, it.target) {
+            (false, t) if t.starts_with("shell:") => t.to_string(),
+            (false, _) => SETTINGS_APP.to_string(),
+            (true, "control.exe") => CONTROL_PANEL.to_string(),
+            (true, "rundll32.exe") => sys.join("sysdm.cpl").to_string_lossy().to_string(),
+            (true, t) => sys.join(t).to_string_lossy().to_string(),
+        };
+        apps.push(App { args: it.args, detail: it.detail, keywords: it.keywords, icon: Some(icon), ..App::new(it.name.to_string(), it.target.to_string(), None) });
     }
     apps.sort_by_key(|a| a.name.to_lowercase());
-    apps
 }
 
 /// A folder under the user folder written from "~", as on the Mac.
@@ -416,7 +453,8 @@ impl Launcher {
                         l.apps = fresh;
                         l.names = names;
                         // Rows hold indices into the old list.
-                        if l.panel.visible() { l.rebuild() } else { l.items.clear() }
+                        // A hidden --test copy (a --dump over SSH) still lists its rows.
+                        if l.panel.visible() || config::test_mode() { l.rebuild() } else { l.items.clear() }
                     }
                 });
             });
@@ -466,7 +504,8 @@ impl Launcher {
             }
             if self.scope != Scope::Files {
                 let take = if self.scope == Scope::Apps { MAX_ITEMS } else { 6 };
-                items.extend(livae_core::search::rank(&q, &self.names, used).into_iter().take(take).map(Item::App));
+                let named: Vec<(&str, &str)> = self.apps.iter().map(|a| (a.name.as_str(), a.keywords)).collect();
+                items.extend(livae_core::search::rank_words(&q, &named, used).into_iter().take(take).map(Item::App));
                 if self.scope == Scope::All {
                     let ql = q.to_lowercase();
                     if "settings".starts_with(&ql) || "preferences".starts_with(&ql) {
@@ -559,7 +598,10 @@ impl Launcher {
                 self.usage.bump(&app.name);
                 self.save_usage();
                 // Opened while we are in front, so Windows lets the app take the focus.
-                shell::open(&app.launch);
+                match app.args {
+                    Some(args) => shell::open_args(&app.launch, args),
+                    None => shell::open(&app.launch),
+                };
                 self.hide(false);
             }
             Item::File(p, _) => {
@@ -611,14 +653,14 @@ impl Launcher {
         match item {
             Item::Scope(t, _) => (t.to_string(), String::new()),
             Item::Clipboard => ("Clipboard".into(), String::new()),
-            Item::App(i) => (self.apps[*i].name.clone(), String::new()),
+            Item::App(i) => (self.apps[*i].name.clone(), self.apps[*i].detail.to_string()),
             Item::File(p, _) => {
                 let name = p.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_else(|| p.to_string_lossy().to_string());
                 (name, p.parent().map(home_text).unwrap_or_default())
             }
             Item::Calc(v) => (v.clone(), String::new()),
             Item::Convert(v, unit) => (format!("{v} {unit}"), String::new()),
-            Item::Settings => ("Settings".into(), String::new()),
+            Item::Settings => ("Livae Settings".into(), String::new()),
             Item::Web(_) => ("Search the web".into(), String::new()),
             Item::Indexing => ("Indexing files…".into(), String::new()),
             Item::Empty => {
@@ -694,7 +736,7 @@ impl Launcher {
             let icon = match item {
                 Item::App(a) => {
                     let app = &self.apps[*a];
-                    let source = app.path.as_ref().map_or(app.launch.clone(), |p| p.to_string_lossy().to_string());
+                    let source = app.icon.clone().or_else(|| app.path.as_ref().map(|p| p.to_string_lossy().to_string())).unwrap_or_else(|| app.launch.clone());
                     Some((format!("app:{}", app.launch), source))
                 }
                 Item::File(p, dir) => Some(file_icon(p, *dir)),

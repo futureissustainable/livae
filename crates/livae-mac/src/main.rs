@@ -15,6 +15,7 @@ mod config;
 #[cfg(target_os = "macos")]
 mod gate;
 #[cfg(target_os = "macos")]
+mod font;
 mod glass;
 #[cfg(target_os = "macos")]
 mod hud;

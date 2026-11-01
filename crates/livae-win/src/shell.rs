@@ -46,6 +46,11 @@ pub fn open(target: &str) -> bool {
     unsafe { ShellExecuteW(None, w!("open"), &HSTRING::from(target), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL).0 as isize > 32 }
 }
 
+/// Open a program with arguments ("control.exe" with "/name Microsoft.CredentialManager").
+pub fn open_args(target: &str, args: &str) -> bool {
+    unsafe { ShellExecuteW(None, w!("open"), &HSTRING::from(target), &HSTRING::from(args), PCWSTR::null(), SW_SHOWNORMAL).0 as isize > 32 }
+}
+
 /// Open a text file; Notepad when `.toml` has no editor yet.
 pub fn edit(path: &Path) {
     let p = path.to_string_lossy();
