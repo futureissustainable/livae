@@ -298,14 +298,15 @@ fn tick() {
         }
         let (now, local) = breaks::clock();
         let away = AWAY.with(|a| a.get());
+        // A test copy shows its break whatever the owner is doing (away, in Focus, Stretchly running), so it can be checked.
+        let test = crate::app::test_mode();
         let t = Tick {
             now,
             local,
-            idle: idle_seconds(),
-            away: away.locked || away.asleep || away.displays_off,
-            focus: FOCUS.load(Ordering::SeqCst),
-            // A test copy may show breaks while the owner's Stretchly still runs.
-            other_app: st.stretchly && !crate::app::test_mode(),
+            idle: if test { 0.0 } else { idle_seconds() },
+            away: !test && (away.locked || away.asleep || away.displays_off),
+            focus: !test && FOCUS.load(Ordering::SeqCst),
+            other_app: st.stretchly && !test,
         };
         let action = st.scheduler.tick(&r, t);
         // Focus matters only near a break, or while it holds one; reading it starts a process.

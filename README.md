@@ -2,7 +2,7 @@
 
 Written in Rust, native on macOS (Liquid Glass) and Windows 11, true black and quiet by default.
 
-![Launcher](assets/screenshots/launcher.png)
+<p align="center"><img src="assets/features.png" alt="Search, clipboard history, breaks and journal" width="100%"></p>
 
 ## What it does
 
@@ -19,8 +19,6 @@ Written in Rust, native on macOS (Liquid Glass) and Windows 11, true black and q
 - **Livae for Zen** (optional browser extension in `extensions/livae-for-zen`): a short wait and a quote before distracting
   sites. With Livae installed it takes its sites, waits and quotes from Livae.
 
-![Clipboard](assets/screenshots/clipboard.png)
-![Journal](assets/screenshots/journal.png)
 ![Year](assets/screenshots/year.png)
 
 ## Install
