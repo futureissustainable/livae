@@ -1,7 +1,6 @@
-# Livae
+<p align="center"><img src="assets/banner.png" alt="Livae. One small, fast app for the things you reach for all day: search apps and files, clipboard history, break reminders and an evening journal. macOS and Windows." width="100%"></p>
 
-One small, fast app for the things you reach for all day: a launcher, a clipboard history, break reminders and an
-evening journal. Written in Rust, native on macOS (Liquid Glass) and Windows 11, true black and quiet by default.
+Written in Rust, native on macOS (Liquid Glass) and Windows 11, true black and quiet by default.
 
 ![Launcher](assets/screenshots/launcher.png)
 

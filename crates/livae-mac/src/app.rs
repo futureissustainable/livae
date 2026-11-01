@@ -10,12 +10,12 @@ use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
-use objc2::{define_class, msg_send, sel, MainThreadOnly};
+use objc2::{define_class, msg_send, sel, AllocAnyThread, MainThreadOnly};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSEvent, NSEventMask, NSMenu, NSMenuDelegate, NSMenuItem, NSStatusBar, NSStatusItem,
-    NSVariableStatusItemLength,
+    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSEvent, NSEventMask, NSImage, NSMenu, NSMenuDelegate, NSMenuItem, NSStatusBar,
+    NSStatusItem, NSVariableStatusItemLength,
 };
-use objc2_foundation::{ns_string, MainThreadMarker, NSNotification, NSObject, NSObjectProtocol, NSString, NSTimer};
+use objc2_foundation::{ns_string, MainThreadMarker, NSData, NSNotification, NSObject, NSObjectProtocol, NSSize, NSString, NSTimer};
 
 use crate::config::{self, Settings};
 
@@ -158,11 +158,12 @@ fn claim_pending() {
         show_shortcut(&s.clip, &settings.clipboard);
         s.taken.setHidden(s.pending.is_empty());
         let paused = crate::clipboard::paused();
-        // ✷ Livae, ✦ once today's journal is written (as Vesper showed it), ! a shortcut is taken, ⏸ clipboard paused.
-        let mark = if crate::journal::state() == crate::journal::JournalState::Done { "✦" } else { "✷" };
-        let title = if !s.pending.is_empty() { format!("{mark}!") } else if paused { format!("{mark} ⏸\u{fe0e}") } else { mark.to_string() };
+        // Livae's L of days; all nine squares once today's journal is written; ! a shortcut is taken, ⏸ clipboard paused.
+        let done = crate::journal::state() == crate::journal::JournalState::Done;
+        let title = if !s.pending.is_empty() { "!" } else if paused { " ⏸\u{fe0e}" } else { "" };
         if let Some(button) = s.status.button(MainThreadMarker::new().unwrap()) {
-            button.setTitle(&NSString::from_str(&title));
+            button.setImage(Some(&mark_image(done)));
+            button.setTitle(&NSString::from_str(title));
             let tip = if s.pending.is_empty() { "Livae" } else { "Livae: another app holds one of your shortcuts; retrying" };
             button.setToolTip(Some(&NSString::from_str(tip)));
         }
@@ -292,6 +293,24 @@ fn menu_item(mtm: MainThreadMarker, title: &str, action: objc2::runtime::Sel, ke
     let item = unsafe { NSMenuItem::initWithTitle_action_keyEquivalent(NSMenuItem::alloc(mtm), &NSString::from_str(title), Some(action), &NSString::from_str(key)) };
     unsafe { item.setTarget(Some(target)) };
     item
+}
+
+/// The menu-bar mark (a template image, so it follows the menu bar's light or dark look), made once per state.
+fn mark_image(done: bool) -> Retained<NSImage> {
+    thread_local! {
+        static MARKS: RefCell<[Option<Retained<NSImage>>; 2]> = const { RefCell::new([None, None]) };
+    }
+    MARKS.with(|m| {
+        m.borrow_mut()[done as usize]
+            .get_or_insert_with(|| {
+                let bytes: &[u8] = if done { include_bytes!("menubar-done.png") } else { include_bytes!("menubar.png") };
+                let img = NSImage::initWithData(NSImage::alloc(), &NSData::with_bytes(bytes)).expect("menu-bar mark");
+                img.setSize(NSSize::new(18.0, 18.0));
+                img.setTemplate(true);
+                img
+            })
+            .clone()
+    })
 }
 
 fn start(mtm: MainThreadMarker, delegate: &AppDelegate) {

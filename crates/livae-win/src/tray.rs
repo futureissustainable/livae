@@ -7,8 +7,8 @@ use std::cell::Cell;
 
 use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
-use windows::Win32::Graphics::Direct2D::Common::{D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED, D2D1_PIXEL_FORMAT};
-use windows::Win32::Graphics::Direct2D::D2D1_RENDER_TARGET_PROPERTIES;
+use windows::Win32::Graphics::Direct2D::Common::{D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT, D2D_RECT_F};
+use windows::Win32::Graphics::Direct2D::{D2D1_RENDER_TARGET_PROPERTIES, D2D1_ROUNDED_RECT};
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::{CreateBitmap, CreateDIBSection, DeleteObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP};
 use windows::Win32::Graphics::Imaging::{CLSID_WICImagingFactory, GUID_WICPixelFormat32bppPBGRA, IWICImagingFactory, WICBitmapCacheOnLoad};
@@ -16,7 +16,6 @@ use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
 use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
 use windows::Win32::UI::Shell::{Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW};
 use windows::Win32::UI::WindowsAndMessaging::*;
-use windows_numerics::Vector2;
 
 use crate::glass::{self, Rgba};
 
@@ -73,7 +72,7 @@ fn data(hwnd: HWND, with_icon: bool) -> NOTIFYICONDATAW {
             } else {
                 Rgba(1.0, 1.0, 1.0, 1.0)
             };
-            if let Some(icon) = star(Rgba(ink.0, ink.1, ink.2, if paused { 0.45 } else { 1.0 })) {
+            if let Some(icon) = mark(Rgba(ink.0, ink.1, ink.2, if paused { 0.45 } else { 1.0 })) {
                 let old = ICON.with(|i| i.replace(icon));
                 if !old.is_invalid() {
                     let _ = unsafe { DestroyIcon(old) };
@@ -156,8 +155,8 @@ pub fn menu(hwnd: HWND) -> u32 {
     }
 }
 
-/// An eight-pointed star in `ink`, at the system's small-icon size.
-fn star(ink: Rgba) -> Option<HICON> {
+/// Livae's mark in `ink` at the system's small-icon size: a 3 x 3 grid of days with the L lit, the other days faint.
+fn mark(ink: Rgba) -> Option<HICON> {
     unsafe {
         let size = GetSystemMetrics(SM_CXSMICON).max(16) as u32;
         let wic: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok()?;
@@ -168,26 +167,20 @@ fn star(ink: Rgba) -> Option<HICON> {
         };
         let d2d = &glass::gfx().d2d;
         let rt = d2d.CreateWicBitmapRenderTarget(&bmp, &props).ok()?;
-        let path = d2d.CreatePathGeometry().ok()?;
-        let sink = path.Open().ok()?;
-        let c = size as f32 / 2.0;
-        let (outer, inner) = (size as f32 * 0.48, size as f32 * 0.2);
-        for k in 0..16 {
-            let a = std::f32::consts::PI * k as f32 / 8.0 - std::f32::consts::FRAC_PI_2;
-            let r = if k % 2 == 0 { outer } else { inner };
-            let p = Vector2::new(c + r * a.cos(), c + r * a.sin());
-            if k == 0 {
-                sink.BeginFigure(p, D2D1_FIGURE_BEGIN_FILLED);
-            } else {
-                sink.AddLine(p);
-            }
-        }
-        sink.EndFigure(D2D1_FIGURE_END_CLOSED);
-        sink.Close().ok()?;
         rt.BeginDraw();
         rt.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }));
-        let brush = rt.CreateSolidColorBrush(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }, None).ok()?;
-        rt.FillGeometry(&path, &brush, None);
+        let s = size as f32;
+        let (cell, gap) = (s * 0.26, s * 0.08);
+        let o = (s - (3.0 * cell + 2.0 * gap)) / 2.0;
+        for r in 0..3 {
+            for c in 0..3 {
+                let lit = c == 0 || r == 2;
+                let brush = rt.CreateSolidColorBrush(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: if lit { 1.0 } else { 0.35 } }, None).ok()?;
+                let (x, y) = (o + c as f32 * (cell + gap), o + r as f32 * (cell + gap));
+                let rect = D2D1_ROUNDED_RECT { rect: D2D_RECT_F { left: x, top: y, right: x + cell, bottom: y + cell }, radiusX: cell * 0.2, radiusY: cell * 0.2 };
+                rt.FillRoundedRectangle(&rect, &brush);
+            }
+        }
         rt.EndDraw(None, None).ok()?;
         let mut px = vec![0u8; (size * size * 4) as usize];
         bmp.CopyPixels(std::ptr::null(), size * 4, &mut px).ok()?;
