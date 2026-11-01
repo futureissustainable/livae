@@ -1,12 +1,11 @@
-/* Livae design tokens (see DESIGN.md). Letters use Livae Sans (OFL, fonts/); digits and symbols use Departure Mono (OFL). */
-@font-face{font-family:"MM Symbols";font-weight:400;font-display:swap;src:url("./fonts/departure-mono.woff2") format("woff2");unicode-range:U+21-2B,U+2F-3F,U+40,U+5B-60,U+7B-7E,U+A0-BF,U+D7,U+2013-2014,U+2018-201D,U+2022,U+2026,U+2032-2033,U+2039-203A,U+20AC,U+2116,U+2190-2193,U+B7}
+/* Livae design tokens (see DESIGN.md). Letters, figures and symbols use Livae Sans (OFL, fonts/); timers use its tabular figures. */
 @font-face{font-family:"Livae Sans";font-weight:400;font-display:swap;src:url("./fonts/LivaeSans-Regular.woff2") format("woff2")}
 @font-face{font-family:"Livae Sans";font-weight:500;font-display:swap;src:url("./fonts/LivaeSans-Medium.woff2") format("woff2")}
 @font-face{font-family:"Livae Sans";font-weight:600;font-display:swap;src:url("./fonts/LivaeSans-SemiBold.woff2") format("woff2")}
 @font-face{font-family:"Livae Sans";font-weight:700;font-display:swap;src:url("./fonts/LivaeSans-Bold.woff2") format("woff2")}
 
 :root {
-  --mm-font-ui:"MM Symbols","Livae Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+  --mm-font-ui:"Livae Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
   --mm-font-code:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
   --mm-canvas:#000000;
   --mm-surface:#111111;
