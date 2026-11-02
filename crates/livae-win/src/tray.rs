@@ -122,18 +122,16 @@ pub fn menu(hwnd: HWND) -> u32 {
         let add = |flags: MENU_ITEM_FLAGS, id: u32, text: &str| {
             let _ = AppendMenuW(m, flags, id as usize, &HSTRING::from(text));
         };
-        // The text after a tab shows right-aligned, where menus show shortcuts.
-        add(MF_STRING, SEARCH, &format!("Search\t{}", s.launcher));
-        add(MF_STRING, CLIPBOARD, &format!("Clipboard\t{}", s.clipboard));
-        add(MF_STRING | if crate::clipboard::paused() { MF_CHECKED } else { MF_UNCHECKED }, PAUSE, "Pause clipboard history");
+        // The same three groups as the Mac menu: what you open (most used first), what runs in the background, the
+        // app. The text after a tab shows right-aligned, where menus show shortcuts; the journal shows its status there.
         if crate::hotkeys::taken() {
             add(MF_STRING | MF_GRAYED, 0, "A shortcut is in use by another app; retrying");
         }
-        // The same four groups as the Mac menu: open, today, what runs, the app.
-        let _ = AppendMenuW(m, MF_SEPARATOR, 0, PCWSTR::null());
-        add(MF_STRING, JOURNAL, "Journal\u{2026}");
-        add(MF_STRING | MF_GRAYED, 0, &crate::journal::status_line());
-        add(MF_STRING, YEAR, "Year View\u{2026}");
+        add(MF_STRING, SEARCH, &format!("Search\t{}", s.launcher));
+        add(MF_STRING, CLIPBOARD, &format!("Clipboard\t{}", s.clipboard));
+        let journal = crate::journal::status_line();
+        add(MF_STRING, JOURNAL, &if journal.is_empty() { "Journal\u{2026}".to_string() } else { format!("Journal\u{2026}\t{journal}") });
+        add(MF_STRING, YEAR, "Year View");
         let _ = AppendMenuW(m, MF_SEPARATOR, 0, PCWSTR::null());
         // Breaks: what is next, and the few things one does with it.
         if let Ok(breaks) = CreatePopupMenu() {
@@ -164,6 +162,7 @@ pub fn menu(hwnd: HWND) -> u32 {
             sub(MF_STRING, EQ_EDIT, "Edit profiles\u{2026}");
             let _ = AppendMenuW(m, MF_POPUP, eq.0 as usize, w!("Equaliser"));
         }
+        add(MF_STRING | if crate::clipboard::paused() { MF_CHECKED } else { MF_UNCHECKED }, PAUSE, "Pause clipboard history");
         let _ = AppendMenuW(m, MF_SEPARATOR, 0, PCWSTR::null());
         add(MF_STRING, SETTINGS, "Settings");
         add(MF_STRING, QUIT, "Quit Livae");

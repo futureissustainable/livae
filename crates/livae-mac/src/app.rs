@@ -298,6 +298,11 @@ define_class!(
             claim_pending(); // refreshes the menu-bar symbol
         }
 
+        #[unsafe(method(quitLivae:))]
+        fn quit_livae(&self, _s: Option<&AnyObject>) {
+            NSApplication::sharedApplication(MainThreadMarker::from(self)).terminate(None);
+        }
+
         #[unsafe(method(openWelcome:))]
         fn open_welcome(&self, _s: Option<&AnyObject>) {
             crate::welcome::show();
@@ -328,7 +333,10 @@ fn refresh_menu() {
     EQ_ITEMS.with(|e| {
         if let Some([item, toggle, compare]) = e.borrow().as_ref() {
             let s = config::get().sound;
-            subtitle(item, &crate::sound::status().text());
+            // Only when it is doing something or needs you: "Off" and "Nothing to change" say nothing.
+            let st = crate::sound::status();
+            let line = if matches!(st, crate::sound::Status::Off | crate::sound::Status::Flat(_)) { String::new() } else { st.text() };
+            subtitle(item, &line);
             toggle.setTitle(if s.eq { ns_string!("Turn Off") } else { ns_string!("Turn On") });
             compare.setState(if s.bypass { objc2_app_kit::NSControlStateValueOn } else { objc2_app_kit::NSControlStateValueOff });
             compare.setEnabled(s.eq);
@@ -352,18 +360,16 @@ pub fn design_dump(dir: &str) {
     }
 }
 
-/// A top-level menu item with its SF Symbol, as macOS 26 menus show them (Quit gets its own from the system).
-fn icon_item(mtm: MainThreadMarker, title: &str, symbol: &str, action: Option<objc2::runtime::Sel>, target: &AppDelegate) -> Retained<NSMenuItem> {
-    let item = match action {
+/// A top-level menu item: a command, or (with no action) the title of a submenu.
+fn item(mtm: MainThreadMarker, title: &str, action: Option<objc2::runtime::Sel>, target: &AppDelegate) -> Retained<NSMenuItem> {
+    match action {
         Some(a) => menu_item(mtm, title, a, "", target),
         None => {
             let item = NSMenuItem::new(mtm);
             item.setTitle(&NSString::from_str(title));
             item
         }
-    };
-    item.setImage(crate::ui::symbol(symbol).as_deref());
-    item
+    }
 }
 
 fn menu_item(mtm: MainThreadMarker, title: &str, action: objc2::runtime::Sel, key: &str, target: &AppDelegate) -> Retained<NSMenuItem> {
@@ -405,26 +411,24 @@ fn start(mtm: MainThreadMarker, delegate: &AppDelegate) {
     } else {
         status.setVisible(true);
     }
-    // Four groups: open (search, the clipboard and its pause), today (journal, year), what runs (breaks,
-    // equaliser), the app. Each status sits under its item as a subtitle, never as a row of its own.
+    // Three groups, plain text, no icons: what you open (most used first), what runs in the background, the app.
+    // A status sits under its item as a subtitle, and only when it says something.
     let menu = NSMenu::new(mtm);
-    let search = icon_item(mtm, "Search", "magnifyingglass", Some(sel!(openLauncher:)), delegate);
-    let clip = icon_item(mtm, "Clipboard", "doc.on.clipboard", Some(sel!(openClipboard:)), delegate);
-    menu.addItem(&search);
-    menu.addItem(&clip);
-    menu.addItem(&icon_item(mtm, "Pause Clipboard History", "pause.circle", Some(sel!(togglePause:)), delegate));
-    let taken = icon_item(mtm, "A Shortcut Is Taken", "exclamationmark.triangle", Some(sel!(openSettings:)), delegate);
+    let taken = item(mtm, "A Shortcut Is Taken", Some(sel!(openSettings:)), delegate);
     taken.setSubtitle(Some(ns_string!("Another app uses it; choose another in Settings")));
     taken.setHidden(true);
     menu.addItem(&taken);
-    menu.addItem(&NSMenuItem::separatorItem(mtm));
-    let journal = icon_item(mtm, "Journal…", "book", Some(sel!(openJournal:)), delegate);
+    let search = item(mtm, "Search", Some(sel!(openLauncher:)), delegate);
+    let clip = item(mtm, "Clipboard", Some(sel!(openClipboard:)), delegate);
+    menu.addItem(&search);
+    menu.addItem(&clip);
+    let journal = item(mtm, "Journal…", Some(sel!(openJournal:)), delegate);
     menu.addItem(&journal);
-    menu.addItem(&icon_item(mtm, "Year View…", "calendar", Some(sel!(openYear:)), delegate));
+    menu.addItem(&item(mtm, "Year View", Some(sel!(openYear:)), delegate));
     JOURNAL_STATUS.with(|j| *j.borrow_mut() = Some(journal));
     menu.addItem(&NSMenuItem::separatorItem(mtm));
     // Breaks: what is next (the subtitle), and the few things one does with it.
-    let breaks_item = icon_item(mtm, "Breaks", "cup.and.saucer", None, delegate);
+    let breaks_item = item(mtm, "Breaks", None, delegate);
     let breaks_menu = NSMenu::new(mtm);
     breaks_menu.addItem(&menu_item(mtm, "Take a Break Now", sel!(breakNow:), "", delegate));
     breaks_menu.addItem(&menu_item(mtm, "Skip to Next Break", sel!(breakSkip:), "", delegate));
@@ -436,7 +440,7 @@ fn start(mtm: MainThreadMarker, delegate: &AppDelegate) {
     menu.addItem(&breaks_item);
     BREAKS_STATUS.with(|b| *b.borrow_mut() = Some(breaks_item));
     // The equaliser: what it is doing (the subtitle), on or off, compare, and its window.
-    let eq_item = icon_item(mtm, "Equaliser", "slider.vertical.3", None, delegate);
+    let eq_item = item(mtm, "Equaliser", None, delegate);
     let eq_menu = NSMenu::new(mtm);
     // Items enable as set below (compare only while the equaliser is on).
     eq_menu.setAutoenablesItems(false);
@@ -449,13 +453,12 @@ fn start(mtm: MainThreadMarker, delegate: &AppDelegate) {
     eq_item.setSubmenu(Some(&eq_menu));
     menu.addItem(&eq_item);
     EQ_ITEMS.with(|e| *e.borrow_mut() = Some([eq_item.clone(), eq_toggle, eq_compare]));
+    menu.addItem(&item(mtm, "Pause Clipboard History", Some(sel!(togglePause:)), delegate));
     menu.setDelegate(Some(ProtocolObject::from_ref(delegate)));
     menu.addItem(&NSMenuItem::separatorItem(mtm));
-    let settings = icon_item(mtm, "Settings…", "gearshape", Some(sel!(openSettings:)), delegate);
-    settings.setKeyEquivalent(ns_string!(","));
-    menu.addItem(&settings);
-    let quit = unsafe { NSMenuItem::initWithTitle_action_keyEquivalent(NSMenuItem::alloc(mtm), ns_string!("Quit Livae"), Some(sel!(terminate:)), ns_string!("q")) };
-    menu.addItem(&quit);
+    menu.addItem(&menu_item(mtm, "Settings…", sel!(openSettings:), ",", delegate));
+    // Its own action, not terminate:, which macOS 26 decorates with an icon of its own.
+    menu.addItem(&menu_item(mtm, "Quit Livae", sel!(quitLivae:), "q", delegate));
     status.setMenu(Some(&menu));
     MENU.with(|m| *m.borrow_mut() = Some(menu.clone()));
 
