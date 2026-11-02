@@ -8,13 +8,17 @@ use crate::eq::{Design, Profile};
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Sound {
-    /// Output devices by name, first choice first. Whenever a device comes or goes, the first one connected becomes
-    /// the system's output; with none connected (or the list empty), the system's own choice stays.
+    /// Output devices by name, first choice first. The first one connected is always the system's output: when a
+    /// device comes or goes, and when anything else switches it. With none connected (or the list empty), the
+    /// system's own choice stays.
     pub outputs: Vec<String>,
     /// Microphones the same way.
     pub inputs: Vec<String>,
     /// The equaliser, on or off for every device at once.
     pub eq: bool,
+    /// Compare: the 10-band EQ and the filters pause while the preamp, boost and limiter stay, so the difference is
+    /// heard at the same level.
+    pub bypass: bool,
     /// One per output device, plus one for every device (`device` empty) that comes first.
     pub profiles: Vec<Profile>,
 }
@@ -32,10 +36,13 @@ impl Sound {
             return Ok(None);
         }
         let chosen = self.chain(device);
-        let design = Design::of(&chosen).map_err(|e| {
+        let mut design = Design::of(&chosen).map_err(|e| {
             let name = chosen.iter().find(|p| crate::eq::parse(&p.filters).is_err()).map(|p| p.device.as_str()).unwrap_or("");
             if name.is_empty() { format!("All devices: {e}") } else { format!("{name}: {e}") }
         })?;
+        if self.bypass {
+            design.filters.clear();
+        }
         Ok((!design.is_flat()).then_some(design))
     }
 
@@ -114,6 +121,10 @@ mod tests {
         assert_eq!(s.design_for("MacBook Pro Speakers").unwrap().unwrap().gain_db, -1.0);
         s.profile_mut("MacBook Pro Speakers").filters = "Filter: ON ZZ Fc 1 Hz".into();
         assert!(s.design_for("MacBook Pro Speakers").unwrap_err().starts_with("MacBook Pro Speakers: Line 1"));
+        s.profile_mut("MacBook Pro Speakers").filters = "Preamp: -2 dB\nFilter 1: ON PK Fc 1000 Hz Gain 3 dB Q 1".into();
+        s.bypass = true;
+        let compare = s.design_for("MacBook Pro Speakers").unwrap().unwrap();
+        assert!(compare.filters.is_empty() && compare.gain_db == -3.0, "compare keeps the gains, pauses the filters");
         s.eq = false;
         assert!(s.design_for("External Headphones").unwrap().is_none());
     }

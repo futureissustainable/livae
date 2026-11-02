@@ -338,6 +338,11 @@ fn command(cmd: u32) {
             config::update(|s| s.sound.eq = !s.sound.eq);
             sound::settings_changed(&before, &config::get());
         }
+        tray::EQ_COMPARE => {
+            let before = config::get();
+            config::update(|s| s.sound.bypass = !s.sound.bypass);
+            sound::settings_changed(&before, &config::get());
+        }
         tray::EQ_EDIT => open_settings(),
         tray::QUIT => unsafe {
             let _ = DestroyWindow(main_hwnd());

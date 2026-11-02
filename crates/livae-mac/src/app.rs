@@ -93,8 +93,8 @@ thread_local! {
     /// The disabled first line of the Breaks submenu ("Next break in 12 min"), refreshed when the menu opens.
     static BREAKS_STATUS: RefCell<Option<Retained<NSMenuItem>>> = const { RefCell::new(None) };
     static JOURNAL_STATUS: RefCell<Option<Retained<NSMenuItem>>> = const { RefCell::new(None) };
-    /// The Equaliser submenu's status line and its on/off item.
-    static EQ_ITEMS: RefCell<Option<(Retained<NSMenuItem>, Retained<NSMenuItem>)>> = const { RefCell::new(None) };
+    /// The Equaliser submenu's status line, its on/off item and its compare item.
+    static EQ_ITEMS: RefCell<Option<[Retained<NSMenuItem>; 3]>> = const { RefCell::new(None) };
     static SHORTCUTS: RefCell<Option<Shortcuts>> = const { RefCell::new(None) };
     static KEEP: RefCell<Vec<Retained<AnyObject>>> = const { RefCell::new(Vec::new()) };
     /// Hotkey id to the launcher command it runs (`[hotkeys]` in the settings).
@@ -185,8 +185,7 @@ pub fn settings_changed(before: &Settings, after: &Settings) {
         crate::expand::apply();
     }
     if before.sound != after.sound {
-        let pin = before.sound.outputs != after.sound.outputs || before.sound.inputs != after.sound.inputs;
-        crate::sound::schedule(pin);
+        crate::sound::schedule();
     }
     if before.glass != after.glass {
         crate::launcher::set_glass(after.glass);
@@ -220,9 +219,12 @@ define_class!(
                 }
             });
             EQ_ITEMS.with(|e| {
-                if let Some((status, toggle)) = e.borrow().as_ref() {
+                if let Some([status, toggle, compare]) = e.borrow().as_ref() {
+                    let s = config::get().sound;
                     status.setTitle(&NSString::from_str(&crate::sound::status().text()));
-                    toggle.setTitle(if config::get().sound.eq { ns_string!("Turn Off") } else { ns_string!("Turn On") });
+                    toggle.setTitle(if s.eq { ns_string!("Turn Off") } else { ns_string!("Turn On") });
+                    compare.setState(if s.bypass { objc2_app_kit::NSControlStateValueOn } else { objc2_app_kit::NSControlStateValueOff });
+                    compare.setEnabled(s.eq);
                 }
             });
         }
@@ -265,6 +267,12 @@ define_class!(
         fn eq_toggle(&self, _s: Option<&AnyObject>) {
             config::update(|s| s.sound.eq = !s.sound.eq);
             crate::settings::refresh();
+        }
+
+        /// Compare: the filters pause, the preamp, boost and limiter stay.
+        #[unsafe(method(eqCompare:))]
+        fn eq_compare(&self, _s: Option<&AnyObject>) {
+            config::update(|s| s.sound.bypass = !s.sound.bypass);
         }
 
         #[unsafe(method(eqEdit:))]
@@ -386,16 +394,21 @@ fn start(mtm: MainThreadMarker, delegate: &AppDelegate) {
     let eq_item = NSMenuItem::new(mtm);
     eq_item.setTitle(ns_string!("Equaliser"));
     let eq_menu = NSMenu::new(mtm);
+    // Items enable as set below (compare only while the equaliser is on).
+    eq_menu.setAutoenablesItems(false);
     let eq_status = NSMenuItem::new(mtm);
     eq_status.setEnabled(false);
     eq_menu.addItem(&eq_status);
     eq_menu.addItem(&NSMenuItem::separatorItem(mtm));
     let eq_toggle = menu_item(mtm, "Turn On", sel!(eqToggle:), "", delegate);
     eq_menu.addItem(&eq_toggle);
+    let eq_compare = menu_item(mtm, "Filters Off (Compare)", sel!(eqCompare:), "", delegate);
+    eq_menu.addItem(&eq_compare);
+    eq_menu.addItem(&NSMenuItem::separatorItem(mtm));
     eq_menu.addItem(&menu_item(mtm, "Edit Equaliser…", sel!(eqEdit:), "", delegate));
     eq_item.setSubmenu(Some(&eq_menu));
     menu.addItem(&eq_item);
-    EQ_ITEMS.with(|e| *e.borrow_mut() = Some((eq_status, eq_toggle)));
+    EQ_ITEMS.with(|e| *e.borrow_mut() = Some([eq_status, eq_toggle, eq_compare]));
     menu.setDelegate(Some(ProtocolObject::from_ref(delegate)));
     menu.addItem(&NSMenuItem::separatorItem(mtm));
     menu.addItem(&menu_item(mtm, "Settings…", sel!(openSettings:), ",", delegate));

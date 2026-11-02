@@ -369,7 +369,7 @@ impl Engine {
         e.started = true;
 
         // A new sample rate (another app, or Bluetooth switching profiles) retunes the filters.
-        let listener: Listener = RcBlock::new(|_n: u32, _a: NonNull<AudioObjectPropertyAddress>| schedule(false));
+        let listener: Listener = RcBlock::new(|_n: u32, _a: NonNull<AudioObjectPropertyAddress>| schedule());
         let a = address(kAudioDevicePropertyNominalSampleRate, kAudioObjectPropertyScopeGlobal);
         if unsafe { AudioObjectAddPropertyListenerBlock(e.aggregate, NonNull::from(&a), Some(DispatchQueue::main()), &*listener as *const _ as *mut _) } == 0 {
             e.rate_listener = Some(listener);
@@ -456,34 +456,56 @@ struct State {
 
 thread_local! {
     static STATE: RefCell<State> = const { RefCell::new(State { engine: None, status: Status::Off, failed: None, asked: false, listeners: Vec::new(), woke: None }) };
-    /// A refresh is already on its way (Core Audio sends changes in bursts); `pin` if any of them asked to.
-    static PENDING: Cell<Option<bool>> = const { Cell::new(None) };
+    /// A refresh is already on its way (Core Audio sends changes in bursts).
+    static PENDING: Cell<bool> = const { Cell::new(false) };
+    /// Livae's recent switches of the output and the microphone, and until when it stands down from fighting.
+    static GUARD: RefCell<[(Vec<std::time::Instant>, Option<std::time::Instant>); 2]> = const { RefCell::new([(Vec::new(), None), (Vec::new(), None)]) };
 }
 
 pub fn status() -> Status {
     STATE.with(|s| s.borrow().status.clone())
 }
 
-/// Refresh soon, once for a burst of changes. `pin`: devices came or went, so the chosen ones are put back in use.
-pub fn schedule(pin: bool) {
-    let first = PENDING.with(|p| {
-        let was = p.get();
-        p.set(Some(was.unwrap_or(false) || pin));
-        was.is_none()
-    });
-    if first {
+/// Refresh soon, once for a burst of changes.
+pub fn schedule() {
+    if !PENDING.with(|p| p.replace(true)) {
         let _ = DispatchQueue::main().after(DispatchTime::NOW.time(300_000_000), || {
-            let pin = PENDING.with(|p| p.take()).unwrap_or(false);
-            refresh(pin);
+            PENDING.with(|p| p.set(false));
+            refresh();
         });
+    }
+}
+
+/// Switch to the chosen device, unless something switched away from it six times in ten seconds: then leave it
+/// for a minute rather than fight.
+fn switch_to(output: bool, id: AudioObjectID) {
+    let now = std::time::Instant::now();
+    let allowed = GUARD.with(|g| {
+        let mut g = g.borrow_mut();
+        let (times, until) = &mut g[usize::from(!output)];
+        if until.is_some_and(|u| now < u) {
+            return false;
+        }
+        times.retain(|t| now.duration_since(*t).as_secs() < 10);
+        if times.len() >= 6 {
+            *until = Some(now + std::time::Duration::from_secs(60));
+            times.clear();
+            return false;
+        }
+        times.push(now);
+        true
+    });
+    if allowed {
+        use_device(output, id);
     }
 }
 
 /// Start listening to the system's devices and apply the settings once.
 pub fn install() {
     let mut listeners = Vec::new();
-    for (selector, pin) in [(kAudioHardwarePropertyDevices, true), (kAudioHardwarePropertyDefaultOutputDevice, false)] {
-        let block: Listener = RcBlock::new(move |_n: u32, _a: NonNull<AudioObjectPropertyAddress>| schedule(pin));
+    // Devices coming and going, and any switch of the output or the microphone (by macOS, an app or a person).
+    for selector in [kAudioHardwarePropertyDevices, kAudioHardwarePropertyDefaultOutputDevice, kAudioHardwarePropertyDefaultInputDevice] {
+        let block: Listener = RcBlock::new(|_n: u32, _a: NonNull<AudioObjectPropertyAddress>| schedule());
         let a = address(selector, kAudioObjectPropertyScopeGlobal);
         if unsafe { AudioObjectAddPropertyListenerBlock(SYSTEM, NonNull::from(&a), Some(DispatchQueue::main()), &*block as *const _ as *mut _) } == 0 {
             listeners.push(block);
@@ -497,7 +519,7 @@ pub fn install() {
         s.listeners = listeners;
         s.woke = Some(observer);
     });
-    refresh(true);
+    refresh();
 }
 
 /// After sleep the hardware may have been reset: build everything again.
@@ -507,25 +529,38 @@ pub fn woke() {
         s.engine = None;
         s.failed = None;
     });
-    schedule(true);
+    schedule();
 }
 
-/// Put the chosen devices in use (when `pin`), then run the output through its equaliser, or not.
-pub fn refresh(pin: bool) {
+/// Put the chosen devices in use, then run the output through its equaliser, or not.
+pub fn refresh() {
     let settings = config::get().sound;
     let list = devices();
-    if pin {
-        for (wanted, output) in [(&settings.outputs, true), (&settings.inputs, false)] {
-            let names: Vec<String> = list.iter().filter(|d| if output { d.output } else { d.input }).map(|d| d.name.clone()).collect();
-            if let Some(name) = pick(wanted, &names)
-                && let Some(d) = list.iter().find(|d| d.name == name && if output { d.output } else { d.input })
-                && default_device(output) != Some(d.id)
-            {
-                use_device(output, d.id);
-            }
+    for (wanted, output) in [(&settings.outputs, true), (&settings.inputs, false)] {
+        let names: Vec<String> = list.iter().filter(|d| if output { d.output } else { d.input }).map(|d| d.name.clone()).collect();
+        if let Some(name) = pick(wanted, &names)
+            && let Some(d) = list.iter().find(|d| d.name == name && if output { d.output } else { d.input })
+            && default_device(output) != Some(d.id)
+        {
+            switch_to(output, d.id);
         }
     }
-    let out = default_device(true).and_then(|id| list.iter().find(|d| d.id == id).cloned());
+    // Ask for the permission as soon as the equaliser has something to do on any output, not only this one.
+    if settings.eq && !settings.profiles.is_empty() && tcc::preflight() == tcc::Access::Unknown && std::env::var_os("LIVAE_TEST_EQ_DEVICE").is_none() {
+        STATE.with(|s| {
+            let mut s = s.borrow_mut();
+            if !s.asked {
+                s.asked = true;
+                tcc::request(|_granted| schedule());
+            }
+        });
+    }
+    // A check can run the equaliser on a named device (BlackHole) while the real output plays on untouched.
+    let test_device = std::env::var("LIVAE_TEST_EQ_DEVICE").ok().filter(|_| crate::app::test_mode());
+    let out = match &test_device {
+        Some(name) => list.iter().find(|d| d.name == *name).cloned(),
+        None => default_device(true).and_then(|id| list.iter().find(|d| d.id == id).cloned()),
+    };
     STATE.with(|state| {
         let mut st = state.borrow_mut();
         let Some(device) = out else {
@@ -546,17 +581,10 @@ pub fn refresh(pin: bool) {
                 return;
             }
         };
-        match tcc::preflight() {
-            tcc::Access::Granted => {}
-            access => {
-                st.engine = None;
-                st.status = Status::NeedsPermission;
-                if access == tcc::Access::Unknown && !st.asked {
-                    st.asked = true;
-                    tcc::request(|_granted| schedule(false));
-                }
-                return;
-            }
+        if tcc::preflight() != tcc::Access::Granted {
+            st.engine = None;
+            st.status = Status::NeedsPermission;
+            return;
         }
         if let Some(e) = st.engine.as_mut().filter(|e| e.device == device.id) {
             e.retune(&design);

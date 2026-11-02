@@ -35,6 +35,7 @@ pub const BREAK_RESUME: u32 = 11;
 pub const YEAR: u32 = 12;
 pub const EQ_TOGGLE: u32 = 13;
 pub const EQ_EDIT: u32 = 14;
+pub const EQ_COMPARE: u32 = 15;
 
 thread_local! {
     static ICON: Cell<HICON> = const { Cell::new(HICON(std::ptr::null_mut())) };
@@ -154,6 +155,7 @@ pub fn menu(hwnd: HWND) -> u32 {
             sub(MF_STRING | MF_GRAYED, 0, &crate::sound::status());
             let _ = AppendMenuW(eq, MF_SEPARATOR, 0, PCWSTR::null());
             sub(MF_STRING, EQ_TOGGLE, if s.sound.eq { "Turn off" } else { "Turn on" });
+            sub(MF_STRING | if s.sound.bypass { MF_CHECKED } else { MF_UNCHECKED } | if s.sound.eq { MF_ENABLED } else { MF_GRAYED }, EQ_COMPARE, "Filters off (compare)");
             sub(MF_STRING, EQ_EDIT, "Edit profiles\u{2026}");
             let _ = AppendMenuW(m, MF_POPUP, eq.0 as usize, w!("Equaliser"));
         }

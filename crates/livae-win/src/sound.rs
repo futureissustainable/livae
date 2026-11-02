@@ -121,21 +121,22 @@ pub fn default_id(flow: EDataFlow) -> Option<String> {
 #[implement(IMMNotificationClient)]
 struct Watcher;
 
+/// Devices coming and going, and any switch of the default (by Windows, an app or a person).
 impl IMMNotificationClient_Impl for Watcher_Impl {
     fn OnDeviceStateChanged(&self, _id: &PCWSTR, _state: DEVICE_STATE) -> windows::core::Result<()> {
-        app::on_main(|| schedule(true));
+        app::on_main(schedule);
         Ok(())
     }
     fn OnDeviceAdded(&self, _id: &PCWSTR) -> windows::core::Result<()> {
-        app::on_main(|| schedule(true));
+        app::on_main(schedule);
         Ok(())
     }
     fn OnDeviceRemoved(&self, _id: &PCWSTR) -> windows::core::Result<()> {
-        app::on_main(|| schedule(true));
+        app::on_main(schedule);
         Ok(())
     }
     fn OnDefaultDeviceChanged(&self, _flow: EDataFlow, _role: ERole, _id: &PCWSTR) -> windows::core::Result<()> {
-        app::on_main(|| schedule(false));
+        app::on_main(schedule);
         Ok(())
     }
     fn OnPropertyValueChanged(&self, _id: &PCWSTR, _key: &PROPERTYKEY) -> windows::core::Result<()> {
@@ -145,8 +146,10 @@ impl IMMNotificationClient_Impl for Watcher_Impl {
 
 thread_local! {
     static WATCH: RefCell<Option<(IMMDeviceEnumerator, IMMNotificationClient)>> = const { RefCell::new(None) };
-    /// A refresh is on its way; `true` if any change asked to put the chosen devices back.
-    static PENDING: Cell<Option<bool>> = const { Cell::new(None) };
+    /// A refresh is on its way (Windows sends changes in bursts, one per role).
+    static PENDING: Cell<bool> = const { Cell::new(false) };
+    /// Livae's recent switches of the output and the microphone, and until when it stands down from fighting.
+    static GUARD: RefCell<[(Vec<std::time::Instant>, Option<std::time::Instant>); 2]> = const { RefCell::new([(Vec::new(), None), (Vec::new(), None)]) };
     static STATUS: RefCell<String> = const { RefCell::new(String::new()) };
 }
 
@@ -157,22 +160,17 @@ pub fn install() {
             WATCH.with(|w| *w.borrow_mut() = Some((e, client)));
         }
     }
-    refresh(true);
+    refresh();
 }
 
-/// Refresh once for a burst of changes, a moment after the last.
-pub fn schedule(pin: bool) {
-    let first = PENDING.with(|p| {
-        let was = p.get();
-        p.set(Some(was.unwrap_or(false) || pin));
-        was.is_none()
-    });
-    if first {
+/// Refresh once for a burst of changes, a moment after the first.
+pub fn schedule() {
+    if !PENDING.with(|p| p.replace(true)) {
         std::thread::spawn(|| {
             std::thread::sleep(std::time::Duration::from_millis(300));
             app::on_main(|| {
-                let pin = PENDING.with(|p| p.take()).unwrap_or(false);
-                refresh(pin);
+                PENDING.with(|p| p.set(false));
+                refresh();
             });
         });
     }
@@ -180,7 +178,31 @@ pub fn schedule(pin: bool) {
 
 pub fn settings_changed(before: &Settings, after: &Settings) {
     if before.sound != after.sound {
-        schedule(before.sound.outputs != after.sound.outputs || before.sound.inputs != after.sound.inputs);
+        schedule();
+    }
+}
+
+/// Switch to the chosen device, unless something switched away from it six times in ten seconds: then leave it
+/// for a minute rather than fight.
+fn switch_to(flow: EDataFlow, id: &str) {
+    let now = std::time::Instant::now();
+    let allowed = GUARD.with(|g| {
+        let mut g = g.borrow_mut();
+        let (times, until) = &mut g[usize::from(flow == eCapture)];
+        if until.is_some_and(|u| now < u) {
+            return false;
+        }
+        times.retain(|t| now.duration_since(*t).as_secs() < 10);
+        if times.len() >= 6 {
+            *until = Some(now + std::time::Duration::from_secs(60));
+            times.clear();
+            return false;
+        }
+        times.push(now);
+        true
+    });
+    if allowed {
+        use_device(id);
     }
 }
 
@@ -189,19 +211,17 @@ pub fn status() -> String {
     STATUS.with(|s| if s.borrow().is_empty() { "Off".into() } else { s.borrow().clone() })
 }
 
-/// Put the chosen devices in use (when `pin`), then write the equaliser for Equalizer APO.
-pub fn refresh(pin: bool) {
+/// Put the chosen devices in use, then write the equaliser for Equalizer APO.
+pub fn refresh() {
     let sound = config::get().sound;
     let outputs = devices(eRender);
-    if pin {
-        for (wanted, list, flow) in [(&sound.outputs, outputs.clone(), eRender), (&sound.inputs, devices(eCapture), eCapture)] {
-            let connected: Vec<String> = list.iter().filter(|d| d.connected).map(|d| d.name.clone()).collect();
-            if let Some(name) = pick(wanted, &connected)
-                && let Some(d) = list.iter().find(|d| d.connected && d.name == name)
-                && default_id(flow).as_deref() != Some(d.id.as_str())
-            {
-                use_device(&d.id);
-            }
+    for (wanted, list, flow) in [(&sound.outputs, outputs.clone(), eRender), (&sound.inputs, devices(eCapture), eCapture)] {
+        let connected: Vec<String> = list.iter().filter(|d| d.connected).map(|d| d.name.clone()).collect();
+        if let Some(name) = pick(wanted, &connected)
+            && let Some(d) = list.iter().find(|d| d.connected && d.name == name)
+            && default_id(flow).as_deref() != Some(d.id.as_str())
+        {
+            switch_to(flow, &d.id);
         }
     }
     let line = write_apo(&sound, &outputs);
