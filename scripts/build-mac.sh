@@ -53,5 +53,6 @@ fi
 MAIN=$(ps -eo pid=,args= | awk -v exe="$APP/Contents/MacOS/Livae" '$2 == exe && NF == 2 {print $1}')
 [ -n "$MAIN" ] && kill $MAIN && for _ in $(seq 50); do kill -0 $MAIN 2>/dev/null || break; sleep 0.1; done
 rm -rf "$APP" && mv "$APP.new" "$APP"
-[ -n "$MAIN" ] && open -g "$APP"
+# -n: a running --test copy shares the bundle, and a plain open would only activate it.
+[ -n "$MAIN" ] && open -n -g "$APP"
 echo "installed $APP${MAIN:+ (restarted)}"

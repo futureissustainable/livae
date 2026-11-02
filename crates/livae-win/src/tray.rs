@@ -157,7 +157,7 @@ pub fn menu(hwnd: HWND) -> u32 {
     }
 }
 
-/// Livae's mark in `ink` at the system's small-icon size: a 3 x 3 grid of days with the L lit, the other days faint.
+/// Livae's mark in `ink` at the system's small-icon size: a 3 x 3 grid of days with the middle day lit, the other days faint.
 fn mark(ink: Rgba) -> Option<HICON> {
     unsafe {
         let size = GetSystemMetrics(SM_CXSMICON).max(16) as u32;
@@ -176,7 +176,7 @@ fn mark(ink: Rgba) -> Option<HICON> {
         let o = (s - (3.0 * cell + 2.0 * gap)) / 2.0;
         for r in 0..3 {
             for c in 0..3 {
-                let lit = c == 0 || r == 2;
+                let lit = r == 1 && c == 1;
                 let brush = rt.CreateSolidColorBrush(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: if lit { 1.0 } else { 0.35 } }, None).ok()?;
                 let (x, y) = (o + c as f32 * (cell + gap), o + r as f32 * (cell + gap));
                 let rect = D2D1_ROUNDED_RECT { rect: D2D_RECT_F { left: x, top: y, right: x + cell, bottom: y + cell }, radiusX: cell * 0.2, radiusY: cell * 0.2 };

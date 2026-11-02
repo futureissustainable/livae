@@ -158,7 +158,7 @@ fn claim_pending() {
         show_shortcut(&s.clip, &settings.clipboard);
         s.taken.setHidden(s.pending.is_empty());
         let paused = crate::clipboard::paused();
-        // Livae's L of days; all nine squares once today's journal is written; ! a shortcut is taken, ⏸ clipboard paused.
+        // Livae's grid of days, today lit; all nine squares once today's journal is written; ! a shortcut is taken, ⏸ clipboard paused.
         let done = crate::journal::state() == crate::journal::JournalState::Done;
         let title = if !s.pending.is_empty() { "!" } else if paused { " ⏸\u{fe0e}" } else { "" };
         if let Some(button) = s.status.button(MainThreadMarker::new().unwrap()) {
@@ -393,7 +393,14 @@ fn start(mtm: MainThreadMarker, delegate: &AppDelegate) {
     SHORTCUTS.with(|cell| {
         *cell.borrow_mut() = Some(Shortcuts { manager, active: Vec::new(), pending: Vec::new(), suspended: test_mode(), status, search, clip, taken })
     });
-    if !test_mode() {
+    if test_mode() {
+        // A test copy is the same bundle, so while it runs, opening Livae.app only activates it (02.11.2026): it quits
+        // itself after 15 minutes and can never stand in for the everyday copy.
+        std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_secs(15 * 60));
+            std::process::exit(0)
+        });
+    } else {
         apply_shortcuts();
     }
     let retry = RcBlock::new(|_t: NonNull<NSTimer>| {
