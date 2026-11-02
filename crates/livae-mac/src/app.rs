@@ -476,6 +476,11 @@ fn start(mtm: MainThreadMarker, delegate: &AppDelegate) {
             let _ = std::fs::write(&path, crate::launcher::dump());
         });
     }
+    // `--type-keys text`: a test copy types it after 2.5 s into the app in front (a check's own throwaway window).
+    if let Some(text) = args.iter().position(|a| a == "--type-keys").and_then(|i| args.get(i + 1)).filter(|_| test_mode()).cloned() {
+        let after = dispatch2::DispatchTime::NOW.time(2_500_000_000);
+        let _ = dispatch2::DispatchQueue::main().after(after, move || crate::expand::type_as_person(&text));
+    }
     // `--run id,id`: run launcher commands in turn, the way their hotkeys would (a test copy only logs them).
     if let Some(ids) = args.iter().position(|a| a == "--run").and_then(|i| args.get(i + 1)) {
         let pid = args.iter().position(|a| a == "--pid").and_then(|i| args.get(i + 1)).and_then(|p| p.parse().ok());

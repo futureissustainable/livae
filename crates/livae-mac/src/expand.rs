@@ -30,7 +30,9 @@ thread_local! {
 /// Start or stop listening to match the settings (called at start and on every settings change).
 pub fn apply() {
     let s = crate::config::get();
-    let on = s.expansion && !crate::app::test_mode() && crate::access::trusted();
+    // A test copy types only when a check asks for it (LIVAE_TEST_EXPANSION), into its own throwaway window.
+    let allowed = !crate::app::test_mode() || std::env::var_os("LIVAE_TEST_EXPANSION").is_some();
+    let on = s.expansion && allowed && crate::access::trusted();
     STATE.with(|cell| {
         let mut slot = cell.borrow_mut();
         match (on, slot.as_mut()) {
@@ -104,10 +106,14 @@ fn on_event(ev: &NSEvent) {
 }
 
 fn post(source: Option<&CGEventSource>, code: u16, text: Option<&[u16]>) {
+    post_as(source, code, text, OURS);
+}
+
+fn post_as(source: Option<&CGEventSource>, code: u16, text: Option<&[u16]>, mark: i64) {
     for down in [true, false] {
         let e = CGEvent::new_keyboard_event(source, code, down);
         CGEvent::set_flags(e.as_deref(), CGEventFlags(0));
-        CGEvent::set_integer_value_field(e.as_deref(), CGEventField::EventSourceUserData, OURS);
+        CGEvent::set_integer_value_field(e.as_deref(), CGEventField::EventSourceUserData, mark);
         if let Some(t) = text {
             unsafe { CGEvent::keyboard_set_unicode_string(e.as_deref(), t.len() as _, t.as_ptr()) };
         }
@@ -161,4 +167,14 @@ pub fn type_snippet(text: &str) {
     let (text, left) = livae_core::snippets::render(text, livae_core::journal::now(), clipboard_text);
     let after = dispatch2::DispatchTime::NOW.time(80_000_000);
     let _ = dispatch2::DispatchQueue::main().after(after, move || type_text(&text, 0, left));
+}
+
+/// `--type-keys` in a test copy: type `text` one key at a time like a person (unmarked, so the monitor reads it).
+pub fn type_as_person(text: &str) {
+    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState);
+    for c in text.chars() {
+        let mut buf = [0u16; 2];
+        post_as(source.as_deref(), 0, Some(c.encode_utf16(&mut buf)), 0);
+        std::thread::sleep(std::time::Duration::from_millis(60));
+    }
 }
