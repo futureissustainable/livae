@@ -1,6 +1,6 @@
 @import url("theme.css");
 html, body { min-height: 100%; }
-.gate { min-height: 100svh; display: flex; flex-direction: column; padding: 24px clamp(24px, 6vw, 96px); animation: appear 240ms var(--ease); }
+.gate { min-height: 100svh; display: flex; flex-direction: column; padding: 24px clamp(24px, 6vw, 96px); }
 .brand { margin: 0; color: var(--dim); font-size: 13px; letter-spacing: .05em; text-transform: uppercase; }
 .stage { flex: 1; display: flex; align-items: center; padding: 64px 0; }
 .idea { margin: 0; max-width: 24em; font-weight: 500; font-size: clamp(24px, 2.4vw, 32px); line-height: 1.25; letter-spacing: -.02em; }
@@ -12,8 +12,16 @@ html, body { min-height: 100%; }
 .actions button { min-height: 44px; padding: 8px 20px; border: 1px solid var(--hair); border-radius: 5px; color: var(--fg); background: transparent; transition: background 160ms var(--ease), transform 160ms var(--ease); }
 .actions button:hover { background: #242423; }
 .actions button:active { transform: scale(.97); }
-body.zen-out .gate { opacity: 0; transition: opacity 240ms var(--ease); }
-@keyframes appear { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+/* Bloom into focus: the quote grows a touch with a soft overshoot while it sharpens, its words rise one after
+   another, the footer follows. Leaving, the page shrinks a little and blurs away. Values: theme.css. */
+.idea { transform-origin: 0 50%; animation: livae-bloom var(--livae-bloom-ms) var(--livae-bloom) both, livae-focus var(--livae-focus-ms) var(--livae-ease-focus) both; }
+.zen-quote .w { display: inline-block; white-space: pre; animation: livae-word var(--livae-focus-ms) var(--livae-ease-focus) both; animation-delay: calc(120ms + var(--i) * var(--livae-stagger)); }
+.footer { animation: livae-focus var(--livae-focus-ms) var(--livae-ease-focus) 200ms both; }
+body.zen-out .gate { opacity: 0; transform: scale(var(--livae-exit-scale)); filter: blur(var(--livae-exit-blur));
+  transition: opacity var(--livae-exit-ms) var(--livae-ease-exit), transform var(--livae-exit-ms) var(--livae-ease-exit), filter var(--livae-exit-ms) var(--livae-ease-exit); }
+@keyframes livae-bloom { from { transform: scale(var(--livae-bloom-from)); } to { transform: none; } }
+@keyframes livae-focus { from { opacity: 0; filter: blur(var(--livae-focus-blur)); } to { opacity: 1; filter: none; } }
+@keyframes livae-word { from { opacity: 0; transform: translateY(var(--livae-word-rise)); filter: blur(var(--livae-row-blur)); } to { opacity: 1; transform: none; filter: none; } }
 @media(max-width: 600px) { .gate { padding-top: 24px; } .footer { flex-wrap: wrap; gap: 16px; } .meta { width: 100%; } .actions { margin-left: 0; } .timer { margin-left: auto; } }
 @media(prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } .actions button:active { transform: none; } }
 

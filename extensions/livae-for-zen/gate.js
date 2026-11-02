@@ -3,7 +3,8 @@
 // Firefox exposes the promise-based `browser`; Chrome only `chrome`.
 const api = globalThis.browser ?? globalThis.chrome
 
-const DISSOLVE = 240      // ms of fade-out before we hand over
+// ms of the exit before we hand over: Livae's exit time (theme.css, the same as livae-core's motion).
+const DISSOLVE = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--livae-exit-ms'), 10) || 160
 
 const quoteEl = document.querySelector('.zen-quote')
 const authorEl = document.querySelector('.zen-author')
@@ -48,7 +49,20 @@ async function showQuote () {
   const quote = text.replace(/[^\S\r\n]+/g, ' ').trim()
   authorEl.textContent = author
 
-  quoteEl.textContent = quote
+  // One span per word, so the words can rise one after another; the owner's line breaks stay. Laid out once the
+  // font is in, so the lines never re-wrap while the words come in.
+  await document.fonts.ready
+  let n = 0
+  quoteEl.replaceChildren(...quote.split('\n').flatMap((line, l) => {
+    const words = line.split(' ').map((w, i, all) => {
+      const s = document.createElement('span')
+      s.className = 'w'
+      s.style.setProperty('--i', String(n++))
+      s.textContent = i < all.length - 1 ? w + ' ' : w
+      return s
+    })
+    return l === 0 ? words : [document.createElement('br'), ...words]
+  }))
   ideaEl.classList.add('zen-typed')
 }
 

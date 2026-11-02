@@ -9,6 +9,7 @@ pub mod field;
 pub mod files;
 pub mod history;
 pub mod journal;
+pub mod motion;
 pub mod quicklinks;
 pub mod rows;
 pub mod search;

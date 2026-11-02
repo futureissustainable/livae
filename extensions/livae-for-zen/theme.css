@@ -1,5 +1,21 @@
 @import url("tokens.css");
 :root { color-scheme: dark; --fg: #e6e8ea; --dim: #aaadb3; --bg: #000000; --hair: #313336; --ease: cubic-bezier(.23,1,.32,1); }
+/* Livae's motion, the same values as livae-core's motion module (a core test checks every line below). */
+:root {
+  --livae-bloom: linear(0.0000, 0.0174, 0.0630, 0.1285, 0.2066, 0.2917, 0.3791, 0.4655, 0.5482, 0.6254, 0.6958, 0.7589, 0.8144, 0.8622, 0.9028, 0.9365, 0.9639, 0.9858, 1.0027, 1.0153, 1.0243, 1.0303, 1.0337, 1.0352, 1.0352, 1.0340, 1.0319, 1.0294, 1.0264, 1.0234, 1.0203, 1.0173, 1.0145, 1.0119, 1.0095, 1.0074, 1.0056, 1.0041, 1.0028, 1.0017, 1.0008);
+  --livae-bloom-ms: 600ms;
+  --livae-bloom-from: 0.9;
+  --livae-focus-blur: 12px;
+  --livae-row-blur: 5px;
+  --livae-exit-blur: 8px;
+  --livae-word-rise: 6px;
+  --livae-stagger: 26ms;
+  --livae-focus-ms: 340ms;
+  --livae-exit-ms: 160ms;
+  --livae-exit-scale: 0.94;
+  --livae-ease-focus: cubic-bezier(0.16, 1, 0.3, 1);
+  --livae-ease-exit: cubic-bezier(0.4, 0, 1, 1);
+}
 * { box-sizing: border-box; }
 body { margin: 0; color: var(--fg); background: var(--bg); font: 400 14px/1.6 var(--mm-font-ui); -webkit-font-smoothing: antialiased; }
 button, a { -webkit-tap-highlight-color: transparent; }
