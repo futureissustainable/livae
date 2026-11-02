@@ -76,7 +76,6 @@ struct Ui {
     history_count: Retained<NSTextField>,
     breaks_status: Retained<NSTextField>,
     journal_status: Retained<NSTextField>,
-    private_status: Retained<NSTextField>,
     private_allow: Retained<NSButton>,
     login: Retained<NSSwitch>,
     expansion: Retained<NSSwitch>,
@@ -568,16 +567,24 @@ pub fn refresh() {
     let s = config::get();
     UI.with(|u| {
         let Some(ui) = u.borrow().as_ref().map(|ui| {
-            (ui.launcher.clone(), ui.clipboard.clone(), ui.paste_status.clone(), ui.allow.clone(), ui.folders.clone(), ui.login.clone(), ui.private_status.clone(), ui.private_allow.clone(), ui.home_only.clone(), ui.ignored.clone(), ui.breaks_status.clone(), ui.journal_status.clone(), ui.ignore_reset.clone(), ui.history_count.clone())
+            (ui.launcher.clone(), ui.clipboard.clone(), ui.paste_status.clone(), ui.allow.clone(), ui.folders.clone(), ui.login.clone(), ui.private_allow.clone(), ui.home_only.clone(), ui.ignored.clone(), ui.breaks_status.clone(), ui.journal_status.clone(), ui.ignore_reset.clone(), ui.history_count.clone())
         }) else {
             return;
         };
-        let (launcher, clipboard, paste_status, allow, folders, login, private_status, private_allow, home_only, ignored, breaks_status, journal_status, ignore_reset, history_count) = ui;
+        let (launcher, clipboard, paste_status, allow, folders, login, private_allow, home_only, ignored, breaks_status, journal_status, ignore_reset, history_count) = ui;
         ignore_reset.setHidden(s.ignore_apps == config::Settings::default().ignore_apps);
         let (items, pinned) = crate::clipboard::counts();
         history_count.setStringValue(&NSString::from_str(&format!("{items} items, {pinned} pinned")));
         breaks_status.setStringValue(&NSString::from_str(&crate::breaks::status_line()));
-        journal_status.setStringValue(&NSString::from_str(&crate::journal::status_line()));
+        // The time has its own row below: here, only whether today's note is done.
+        let journal_line = if !s.journal.enabled {
+            "Off".to_string()
+        } else if crate::journal::written_today() {
+            "Today's note is written".to_string()
+        } else {
+            "One short note each evening".to_string()
+        };
+        journal_status.setStringValue(&NSString::from_str(&journal_line));
         // App names for the ignored bundle ids; an id with no installed app shows as itself.
         let names: Vec<String> = s
             .ignore_apps
@@ -594,7 +601,6 @@ pub fn refresh() {
         ignored.setStringValue(&NSString::from_str(&if names.is_empty() { "Nothing".to_string() } else { names.join(", ") }));
         home_only.setHidden(s.file_search == ["~"]);
         let open = crate::access::folders_allowed();
-        private_status.setStringValue(&NSString::from_str(if open { "Searched" } else { "Not searched until you allow it" }));
         private_allow.setHidden(open);
         launcher.setTitle(&NSString::from_str(&crate::ui::shortcut_label(&s.launcher)));
         clipboard.setTitle(&NSString::from_str(&crate::ui::shortcut_label(&s.clipboard)));
@@ -609,7 +615,8 @@ pub fn refresh() {
         paste_status.setStringValue(&NSString::from_str(status));
         allow.setHidden(trusted || !s.paste);
         let names: Vec<String> = s.file_search.iter().map(|f| if f == "~" { "Home folder".to_string() } else { f.clone() }).collect();
-        folders.setStringValue(&NSString::from_str(&names.join(", ")));
+        let private = if open { ", with Desktop, Documents and Downloads" } else { ". Desktop, Documents and Downloads need your OK" };
+        folders.setStringValue(&NSString::from_str(&format!("{}{private}", names.join(", "))));
         login.setState(if crate::access::open_at_login() { NSControlStateValueOn } else { NSControlStateValueOff });
         if let Some((sw, status)) = u.borrow().as_ref().map(|ui| (ui.expansion.clone(), ui.expansion_status.clone())) {
             sw.setState(if s.expansion { NSControlStateValueOn } else { NSControlStateValueOff });
@@ -631,7 +638,8 @@ pub fn refresh() {
             CHOICES.with(|c| *c.borrow_mut() = (o, i));
             eq.setState(if s.sound.eq { NSControlStateValueOn } else { NSControlStateValueOff });
             let status = crate::sound::status();
-            eq_status.setStringValue(&NSString::from_str(&status.text()));
+            let line = if status == crate::sound::Status::Off { "A 10-band EQ, filters and a boost for each output".to_string() } else { status.text() };
+            eq_status.setStringValue(&NSString::from_str(&line));
             eq_allow.setHidden(status != crate::sound::Status::NeedsPermission);
         }
     });
@@ -827,7 +835,7 @@ fn build(mtm: MainThreadMarker) {
     let slider = unsafe { NSSlider::sliderWithValue_minValue_maxValue_target_action(s.glass, 0.0, 1.0, tgt, Some(sel!(glassChanged:)), mtm) };
     slider.setContinuous(true);
     let glass_help = help();
-    glass_help.setStringValue(ns_string!("From clear to black, for the search and the clipboard"));
+    glass_help.setStringValue(ns_string!("Darker reads better over bright windows"));
     p.row("Glass", &[(&slider, VALUE_W, 24.0)], Some(&glass_help));
     p.group();
     let welcome = button("Welcome…", sel!(openWelcome:));
@@ -840,18 +848,17 @@ fn build(mtm: MainThreadMarker) {
     p.title("Search");
     let results = popup(RESULTS.iter().map(|n| n.to_string()).collect(), RESULTS.iter().position(|&n| n == s.results).unwrap_or(4), sel!(resultsChanged:));
     let results_help = help();
-    results_help.setStringValue(ns_string!("The clipboard shows as many"));
+    results_help.setStringValue(ns_string!("The clipboard shows the same number"));
     p.row("Results shown", &[(&results, VALUE_W, 28.0)], Some(&results_help));
     let recent = switch(s.recent_apps, sel!(recentToggled:));
     p.row("Show most used apps", &[(&recent, 40.0, 22.0)], None);
     p.group();
     let add = button("Add…", sel!(addFolder:));
     let reset = button("Home Only", sel!(resetFolders:));
+    // Where it looks, with Desktop, Documents and Downloads in the same line (macOS asks for those apart).
     let folders = help();
-    p.row("Search in", &[(&add, BUTTON_W, 28.0), (&reset, BUTTON_W, 28.0)], Some(&folders));
     let private_allow = button("Allow…", sel!(allowFolders:));
-    let private_status = help();
-    p.row("Desktop, Documents, Downloads", &[(&private_allow, BUTTON_W, 28.0)], Some(&private_status));
+    p.row("Search in", &[(&add, BUTTON_W, 28.0), (&reset, BUTTON_W, 28.0), (&private_allow, BUTTON_W, 28.0)], Some(&folders));
     views.push(v);
 
     // Clipboard: pasting, how much is kept, what is never recorded.
@@ -979,7 +986,7 @@ fn build(mtm: MainThreadMarker) {
     UI.with(|u| {
         *u.borrow_mut() = Some(Ui {
             window, glass, launcher, clipboard, paste_status, allow, folders, home_only: reset, ignored, ignore_reset, history_count,
-            breaks_status, journal_status, private_status, private_allow, login, expansion, expansion_status, outputs, inputs, eq,
+            breaks_status, journal_status, private_allow, login, expansion, expansion_status, outputs, inputs, eq,
             eq_status, eq_allow, panes: views.into_iter().zip(buttons).collect(), selection, _target: target, _monitor: monitor,
         })
     });

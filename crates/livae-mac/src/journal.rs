@@ -1611,6 +1611,11 @@ pub fn status_line() -> String {
     SCHED.with(|s| s.borrow().tracker.status(&schedule(), now, done))
 }
 
+/// Today's note is saved (for Settings, which shows the time in its own row).
+pub fn written_today() -> bool {
+    done_on(core::now().date())
+}
+
 /// Called after the prompt opens, closes or saves, so the menu bar can redraw ✷ / ✦ at once.
 pub fn on_change(f: fn()) {
     SCHED.with(|s| s.borrow_mut().listener = Some(f));
