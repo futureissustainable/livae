@@ -883,12 +883,12 @@ fn close() {
     STATE.with(|s| s.borrow_mut().hover = None);
     with_ui(|u| {
         u.card.orderOut(None);
-        u.window.orderOut(None);
+        crate::motion::hide(&u.window, crate::motion::SHRINK);
     });
 }
 
 fn visible() -> bool {
-    with_ui(|u| u.window.isVisible()).unwrap_or(false)
+    with_ui(|u| crate::motion::shown(&u.window)).unwrap_or(false)
 }
 
 /// Open on the current year, centred on the screen with the pointer.
@@ -912,6 +912,7 @@ pub fn show() {
         let y = vf.origin.y + ((vf.size.height - H) / 2.0).max(0.0);
         u.window.setFrame_display(rect(x.round(), y.round(), W, H), true);
         ui::present(&u.window);
+        crate::motion::show(&u.window, crate::motion::RISE);
     });
     // A menu-bar app must come forward, or the window gives up the keyboard at once and closes.
     if !crate::app::offscreen() {

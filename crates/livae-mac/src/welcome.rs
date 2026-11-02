@@ -69,7 +69,7 @@ define_class!(
 fn close() {
     UI.with(|u| {
         if let Some(ui) = u.borrow().as_ref() {
-            ui.window.orderOut(None);
+            crate::motion::hide(&ui.window, crate::motion::SHRINK);
         }
     });
 }
@@ -119,6 +119,7 @@ pub fn show() {
         if let Some(ui) = u.borrow().as_ref() {
             ui.window.center();
             crate::ui::present(&ui.window);
+            crate::motion::show(&ui.window, crate::motion::RISE);
         }
     });
     if !crate::app::offscreen() {

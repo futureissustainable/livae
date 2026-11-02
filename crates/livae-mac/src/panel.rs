@@ -48,9 +48,10 @@ define_class!(
     pub struct Panel;
 
     impl Panel {
+        /// Not while it fades out (it lets clicks through then), so the keyboard stays with the app below.
         #[unsafe(method(canBecomeKeyWindow))]
         fn can_become_key_window(&self) -> bool {
-            true
+            !self.ignoresMouseEvents()
         }
 
         #[unsafe(method(performKeyEquivalent:))]

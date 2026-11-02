@@ -78,7 +78,6 @@ enum Item {
 }
 
 struct Row {
-    highlight: Retained<NSBox>,
     icon: Retained<NSImageView>,
     title: Retained<NSTextField>,
     detail: Retained<NSTextField>,
@@ -94,6 +93,8 @@ pub struct Launcher {
     field_font: Retained<NSFont>,
     search_icon: Retained<NSImageView>,
     rows: Vec<Row>,
+    /// The selected row's band; one view that slides between rows.
+    band: Retained<NSBox>,
     apps: Vec<App>,
     names: Vec<String>,
     usage: Usage,
@@ -137,7 +138,7 @@ pub fn with(f: impl FnOnce(&mut Launcher)) {
 }
 
 pub fn toggle() {
-    with(|l| if l.panel.isVisible() { l.hide() } else { l.show() });
+    with(|l| if crate::motion::shown(&l.panel) { l.hide() } else { l.show() });
 }
 
 pub fn set_glass(darkness: f64) {
@@ -183,19 +184,21 @@ pub fn install(mtm: MainThreadMarker) {
     let list = List::new(mtm, Owner::Launcher);
     // No autoresizing: layout() sets the frame; a stretchy mask on top of that shrank it twice inside the glass.
     card.content.addSubview(&list);
+    let band = ui::band(mtm, CARD_RADIUS - INSET);
+    band.setHidden(true);
+    list.addSubview(&band);
     let rows = (0..MAX_ROWS)
         .map(|_| {
-            let highlight = ui::band(mtm, CARD_RADIUS - INSET);
             let icon = NSImageView::new(mtm);
             let title = ui::label(mtm, 16.0, TEXT);
             let detail = ui::label(mtm, 14.0, SECONDARY);
             let hint = ui::label(mtm, 14.0, SECONDARY);
             hint.setAlignment(NSTextAlignment::Right);
-            for v in [&*highlight as &NSView, &icon, &title, &detail, &hint] {
+            for v in [&*icon as &NSView, &title, &detail, &hint] {
                 list.addSubview(v);
                 v.setHidden(true);
             }
-            Row { highlight, icon, title, detail, hint }
+            Row { icon, title, detail, hint }
         })
         .collect();
 
@@ -226,6 +229,7 @@ pub fn install(mtm: MainThreadMarker) {
         field_font,
         search_icon,
         rows,
+        band,
         apps,
         names,
         usage: Usage::load(),
@@ -253,7 +257,7 @@ pub fn install(mtm: MainThreadMarker) {
         if CMD.with(|c| c.replace(cmd)) != cmd {
             with(|l| {
                 if l.panel.isVisible() {
-                    l.paint_selection();
+                    l.paint_selection(false);
                 }
             });
         }
@@ -289,6 +293,7 @@ impl Launcher {
         self.panel.setFrameOrigin(NSPoint::new(x, self.top - FIELD_H));
         self.query_changed();
         ui::present(&self.panel);
+        crate::motion::show(&self.panel, crate::motion::DROP);
         self.panel.makeFirstResponder(Some(&self.field));
     }
 
@@ -323,9 +328,9 @@ impl Launcher {
     }
 
     pub fn hide(&mut self) {
-        if self.panel.isVisible() {
+        if crate::motion::shown(&self.panel) {
             self.generation.fetch_add(1, Ordering::SeqCst);
-            self.panel.orderOut(None);
+            crate::motion::hide(&self.panel, crate::motion::SHRINK);
         }
     }
 
@@ -397,7 +402,7 @@ impl Launcher {
             _ => return Vec::new(),
         };
         self.selected = i;
-        self.paint_selection();
+        self.paint_selection(false);
         items
     }
 
@@ -440,7 +445,7 @@ impl Launcher {
         } else if i != self.selected {
             self.selected = i;
             self.disarm();
-            self.paint_selection();
+            self.paint_selection(true);
         }
     }
 
@@ -680,7 +685,7 @@ impl Launcher {
             self.first = self.selected + 1 - MAX_ROWS;
             self.layout();
         } else {
-            self.paint_selection();
+            self.paint_selection(true);
         }
     }
 
@@ -834,14 +839,18 @@ impl Launcher {
         img
     }
 
-    fn paint_selection(&self) {
+    /// Move the band to the selected row (sliding when `animate`) and show the ⌘ numbers while ⌘ is held.
+    fn paint_selection(&self, animate: bool) {
         let cmd = CMD.with(|c| c.get());
+        let mut band = None;
         for (slot, row) in self.rows.iter().enumerate() {
             let i = self.first + slot;
             let item = self.items.get(i);
             let selectable = !matches!(item, Some(Item::Empty | Item::Searching) | None);
-            let on = i == self.selected && selectable;
-            row.highlight.setHidden(!on);
+            if i == self.selected && selectable && slot < MAX_ROWS.min(self.items.len().saturating_sub(self.first)) {
+                let y = self.card_h - INSET - (slot as f64 + 1.0) * ROW_H;
+                band = Some(NSRect::new(NSPoint::new(INSET, y), NSSize::new(WIDTH - 2.0 * INSET, ROW_H)));
+            }
             let hint = if !selectable {
                 String::new()
             } else if cmd {
@@ -850,6 +859,10 @@ impl Launcher {
                 String::new()
             };
             row.hint.setStringValue(&NSString::from_str(&hint));
+        }
+        match band {
+            Some(r) => crate::motion::slide(&self.band, r, animate),
+            None => self.band.setHidden(true),
         }
     }
 
@@ -875,7 +888,7 @@ impl Launcher {
             let shown = slot < n;
             {
                 let row = &self.rows[slot];
-                for v in [&*row.highlight as &NSView, &row.icon, &row.title, &row.detail, &row.hint] {
+                for v in [&*row.icon as &NSView, &row.title, &row.detail, &row.hint] {
                     v.setHidden(!shown);
                 }
             }
@@ -902,7 +915,6 @@ impl Launcher {
             };
             let quiet = matches!(item, Item::Empty | Item::Searching);
             let row = &self.rows[slot];
-            row.highlight.setFrame(NSRect::new(NSPoint::new(INSET, y), NSSize::new(WIDTH - 2.0 * INSET, ROW_H)));
             let (isz, ix, iy) = if template { (20.0, EDGE + 6.0, y + 12.0) } else { (26.0, EDGE + 3.0, y + 9.0) };
             row.icon.setFrame(NSRect::new(NSPoint::new(ix, iy), NSSize::new(isz, isz)));
             row.icon.setHidden(image.is_none());
@@ -940,6 +952,6 @@ impl Launcher {
                 self.rows[slot].detail.setFrame(NSRect::new(NSPoint::new(detail_x, y + 13.0), NSSize::new((WIDTH - EDGE - 52.0 - detail_x).max(0.0), 18.0)));
             }
         }
-        self.paint_selection();
+        self.paint_selection(false);
     }
 }

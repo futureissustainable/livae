@@ -52,7 +52,6 @@ const SKIP: [&str; 5] = [
 ];
 
 struct Row {
-    highlight: Retained<NSBox>,
     thumb: Retained<NSImageView>,
     swatch: Retained<NSBox>,
     title: Retained<NSTextField>,
@@ -68,6 +67,8 @@ pub struct Clipboard {
     card: Glass,
     field: Retained<NSTextField>,
     rows: Vec<Row>,
+    /// The selected row's band; one view that slides between rows.
+    band: Retained<NSBox>,
     history: History,
     /// Indices into the history matching the query, in display order.
     shown: Vec<usize>,
@@ -101,7 +102,7 @@ pub fn show() {
 }
 
 pub fn toggle() {
-    with(|c| if c.panel.isVisible() { c.hide() } else { c.show() });
+    with(|c| if crate::motion::shown(&c.panel) { c.hide() } else { c.show() });
 }
 
 thread_local! {
@@ -170,9 +171,11 @@ pub fn install(mtm: MainThreadMarker) {
     let list = List::new(mtm, Owner::Clipboard);
     // No autoresizing: layout() sets the frame; a stretchy mask on top of that shrank it twice inside the glass.
     card.content.addSubview(&list);
+    let band = ui::band(mtm, 16.0);
+    band.setHidden(true);
+    list.addSubview(&band);
     let rows = (0..SLOTS)
         .map(|_| {
-            let highlight = ui::band(mtm, 16.0);
             let thumb = NSImageView::new(mtm);
             thumb.setImageScaling(NSImageScaling::ScaleProportionallyUpOrDown);
             thumb.setWantsLayer(true);
@@ -186,7 +189,7 @@ pub fn install(mtm: MainThreadMarker) {
             let detail = ui::label(mtm, 14.0, SECONDARY);
             let time = ui::label(mtm, 14.0, TERTIARY);
             time.setAlignment(NSTextAlignment::Right);
-            for v in [&*highlight as &NSView, &thumb, &swatch, &title, &detail, &time] {
+            for v in [&*thumb as &NSView, &swatch, &title, &detail, &time] {
                 list.addSubview(v);
                 v.setHidden(true);
             }
@@ -195,7 +198,7 @@ pub fn install(mtm: MainThreadMarker) {
             pin.setContentTintColor(Some(&ui::rgb(TERTIARY)));
             pin.setHidden(true);
             list.addSubview(&pin);
-            Row { highlight, thumb, swatch, title, detail, time, pin }
+            Row { thumb, swatch, title, detail, time, pin }
         })
         .collect();
 
@@ -224,6 +227,7 @@ pub fn install(mtm: MainThreadMarker) {
         card,
         field,
         rows,
+        band,
         history,
         shown: Vec::new(),
         first: 0,
@@ -354,19 +358,22 @@ impl Clipboard {
         self.selected = 0;
         self.first = 0;
         self.filter();
-        self.place();
+        let above = self.place();
         ui::present(&self.panel);
+        // It grows out of the text cursor: from its top edge when it opens below the cursor, else from its bottom.
+        crate::motion::show(&self.panel, crate::motion::Pose::new(0.94, 0.0, (0.5, if above { 0.0 } else { 1.0 })));
         self.panel.makeFirstResponder(Some(&self.field));
     }
 
     pub fn hide(&mut self) {
-        if self.panel.isVisible() {
-            self.panel.orderOut(None);
+        if crate::motion::shown(&self.panel) {
+            crate::motion::hide(&self.panel, crate::motion::SHRINK);
         }
     }
 
-    /// At the text cursor when the app reports it, else at the mouse; flipped above when there is no room below.
-    fn place(&mut self) {
+    /// At the text cursor when the app reports it, else at the mouse; flipped above when there is no room below
+    /// (then true).
+    fn place(&mut self) -> bool {
         let h = self.panel.frame().size.height;
         let mouse = NSEvent::mouseLocation();
         let (anchor_x, below_y, above_y) = match crate::access::caret_rect(ui::primary_height(self.mtm)) {
@@ -377,10 +384,12 @@ impl Clipboard {
         let mut x = anchor_x - TEXT_X;
         x = ui::fit(x, vf.origin.x + 8.0, vf.origin.x + vf.size.width - WIDTH - 8.0);
         let mut top = below_y;
-        if top - h < vf.origin.y + 8.0 {
+        let above = top - h < vf.origin.y + 8.0;
+        if above {
             top = (above_y + h).min(vf.origin.y + vf.size.height - 8.0);
         }
         self.panel.setFrameOrigin(NSPoint::new(x, top - h));
+        above
     }
 
     pub fn event(&mut self, event: Event) -> bool {
@@ -458,7 +467,7 @@ impl Clipboard {
         let i = self.first + slot;
         let Some(&clip) = self.shown.get(i) else { return Vec::new() };
         self.selected = i;
-        self.paint_selection();
+        self.paint_selection(false);
         let pin = if self.history.clips[clip].pinned { "Unpin" } else { "Pin" };
         vec![("Paste", 1), ("Copy", 2), (pin, 3), ("Delete", 4)]
     }
@@ -480,7 +489,7 @@ impl Clipboard {
             self.paste(i);
         } else if i != self.selected {
             self.selected = i;
-            self.paint_selection();
+            self.paint_selection(true);
         }
     }
 
@@ -503,7 +512,7 @@ impl Clipboard {
             self.first = self.selected + 1 - SLOTS;
             self.layout();
         } else {
-            self.paint_selection();
+            self.paint_selection(true);
         }
     }
 
@@ -590,11 +599,15 @@ impl Clipboard {
         }
     }
 
-    fn paint_selection(&self) {
+    /// Move the band to the selected row (sliding when `animate`) and show the times of the rows on screen.
+    fn paint_selection(&self, animate: bool) {
         for (slot, row) in self.rows.iter().enumerate() {
-            let on = !self.shown.is_empty() && slot < self.slots.len() && self.first + slot == self.selected;
-            row.highlight.setHidden(!on);
             row.time.setHidden(self.shown.is_empty() || slot >= self.slots.len());
+        }
+        let slot = self.selected.checked_sub(self.first).filter(|&s| !self.shown.is_empty() && s < self.slots.len());
+        match slot.map(|s| self.slots[s]) {
+            Some((y, h)) => crate::motion::slide(&self.band, NSRect::new(NSPoint::new(INSET, y), NSSize::new(WIDTH - 2.0 * INSET, h)), animate),
+            None => self.band.setHidden(true),
         }
     }
 
@@ -619,14 +632,13 @@ impl Clipboard {
         for slot in 0..SLOTS {
             let row_h = heights.get(slot).copied();
             let row = &self.rows[slot];
-            for v in [&*row.highlight as &NSView, &row.thumb, &row.swatch, &row.title, &row.detail, &row.time, &row.pin] {
+            for v in [&*row.thumb as &NSView, &row.swatch, &row.title, &row.detail, &row.time, &row.pin] {
                 v.setHidden(true);
             }
             let Some(rh) = row_h else { continue };
             y -= rh;
             self.slots.push((y, rh));
             let mid = y + rh / 2.0;
-            row.highlight.setFrame(NSRect::new(NSPoint::new(INSET, y), NSSize::new(WIDTH - 2.0 * INSET, rh)));
             row.title.setHidden(false);
             if empty {
                 let q = self.field.stringValue().to_string();
@@ -706,6 +718,6 @@ impl Clipboard {
             let tx = if clip.kind == Kind::Color { TEXT_X + 28.0 } else { TEXT_X };
             row.title.setFrame(NSRect::new(NSPoint::new(tx, mid - th / 2.0), NSSize::new(text_right - tx, th)));
         }
-        self.paint_selection();
+        self.paint_selection(false);
     }
 }

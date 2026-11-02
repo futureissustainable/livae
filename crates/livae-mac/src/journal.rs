@@ -998,11 +998,16 @@ impl Ui {
         unsafe { self.backdrop.addChildWindow_ordered(&self.window, NSWindowOrderingMode::Above) };
         self.showing.set(true);
         self.ticket.set(self.ticket.get() + 1);
+        let was = crate::motion::shown(&self.window);
         self.backdrop.orderFrontRegardless();
         if crate::app::offscreen() {
             self.window.orderFrontRegardless();
         } else {
             self.window.makeKeyAndOrderFront(None);
+        }
+        if !was {
+            crate::motion::show(&self.backdrop, crate::motion::FADE);
+            crate::motion::show(&self.window, crate::motion::RISE);
         }
         let note: &NSResponder = &self.note;
         self.window.makeFirstResponder(Some(note));
@@ -1026,8 +1031,8 @@ impl Ui {
             t.invalidate();
         }
         self.backdrop.removeChildWindow(&self.window);
-        self.window.orderOut(None);
-        self.backdrop.orderOut(None);
+        crate::motion::hide(&self.window, crate::motion::SHRINK);
+        crate::motion::hide(&self.backdrop, crate::motion::FADE);
     }
 
     /// The keyboard order follows the page: the rating (on its chosen day, or the first; arrows move inside

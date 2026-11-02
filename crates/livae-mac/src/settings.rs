@@ -84,12 +84,21 @@ define_class!(
             finish_recording(None);
         }
 
-        /// Closing Settings hands the focus back to the app the user came from, so the next paste lands there.
-        #[unsafe(method(windowWillClose:))]
-        fn window_will_close(&self, _n: &NSNotification) {
+        /// Closing fades the window out, then hands the focus back to the app the user came from, so the next paste
+        /// lands there.
+        #[unsafe(method(windowShouldClose:))]
+        fn window_should_close(&self, sender: &NSWindow) -> bool {
             finish_recording(None);
-            let mtm = MainThreadMarker::new().unwrap();
-            NSApplication::sharedApplication(mtm).hide(None);
+            let view = sender.contentView();
+            match view {
+                Some(view) => crate::motion::exit(sender, &view, crate::motion::SHRINK, || {
+                    if let Some(mtm) = MainThreadMarker::new() {
+                        NSApplication::sharedApplication(mtm).hide(None);
+                    }
+                }),
+                None => sender.orderOut(None),
+            }
+            false
         }
     }
 
@@ -468,6 +477,7 @@ pub fn show() {
                     scroll.reflectScrolledClipView(&scroll.contentView());
                 }
             crate::ui::present(&ui.window);
+            crate::motion::show(&ui.window, crate::motion::RISE);
         }
     });
     if !crate::app::offscreen() {

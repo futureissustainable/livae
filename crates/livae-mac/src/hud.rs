@@ -66,8 +66,11 @@ pub fn show(text: &str, at: NSPoint) {
         hud.label.setFrame(NSRect::new(NSPoint::new(20.0, (H - 18.0) / 2.0), NSSize::new(w - 40.0, 18.0)));
         hud.panel.setFrame_display(NSRect::new(NSPoint::new(at.x - w / 2.0, at.y - H / 2.0), NSSize::new(w, H)), true);
         hud.glass.root.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w, H)));
-        hud.panel.setAlphaValue(1.0);
+        let was = crate::motion::shown(&hud.panel);
         hud.panel.orderFrontRegardless();
+        if !was {
+            crate::motion::show(&hud.panel, crate::motion::POP);
+        }
         hud.shown += 1;
         hud.shown
     });
@@ -76,7 +79,7 @@ pub fn show(text: &str, at: NSPoint) {
         HUD.with(|h| {
             if let Some(hud) = h.borrow().as_ref()
                 && hud.shown == ticket {
-                    hud.panel.orderOut(None);
+                    crate::motion::hide(&hud.panel, crate::motion::SHRINK);
                 }
         });
     });

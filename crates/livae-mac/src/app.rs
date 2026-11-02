@@ -476,6 +476,11 @@ fn start(mtm: MainThreadMarker, delegate: &AppDelegate) {
             let _ = std::fs::write(&path, crate::launcher::dump());
         });
     }
+    // `--hide-after s`: close the launcher after s seconds, to check its exit.
+    if let Some(secs) = args.iter().position(|a| a == "--hide-after").and_then(|i| args.get(i + 1)).and_then(|s| s.parse::<f64>().ok()) {
+        let after = dispatch2::DispatchTime::NOW.time((secs * 1e9) as i64);
+        let _ = dispatch2::DispatchQueue::main().after(after, || crate::launcher::with(|l| l.hide()));
+    }
     // `--type-keys text`: a test copy types it after 2.5 s into the app in front (a check's own throwaway window).
     if let Some(text) = args.iter().position(|a| a == "--type-keys").and_then(|i| args.get(i + 1)).filter(|_| test_mode()).cloned() {
         let after = dispatch2::DispatchTime::NOW.time(2_500_000_000);

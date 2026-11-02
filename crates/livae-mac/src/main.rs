@@ -27,6 +27,8 @@ mod launcher;
 #[cfg(target_os = "macos")]
 mod list;
 #[cfg(target_os = "macos")]
+mod motion;
+#[cfg(target_os = "macos")]
 mod panel;
 #[cfg(target_os = "macos")]
 mod settings;
