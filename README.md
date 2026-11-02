@@ -23,7 +23,8 @@ Written in Rust, native on macOS (Liquid Glass) and Windows 11, true black and q
   boost and a limiter that keeps it from clipping, with the curve drawn live. On the Mac it runs inside Livae, with no
   driver: macOS asks once to let Livae hear what apps play, and for an output that has a microphone (a headset, a
   USB DAC) also for the microphone, which Livae keeps off. On Windows it drives
-  [Equalizer APO](https://sourceforge.net/projects/equalizerapo/), which you install once.
+  [Equalizer APO](https://sourceforge.net/projects/equalizerapo/), which you install once and add to each output in
+  its Configurator; the tray says when the output in use still needs it.
 - **Clipboard history** (Shift+Cmd+C, Win+Shift+V): text, links, colours, images and files in one list, opened at your
   text cursor. Pin what you keep; copies from password managers are never recorded.
 - **Breaks** (off until you turn them on): a calm full-screen pause with a quote, on a Stretchly-like schedule, that

@@ -349,6 +349,7 @@ fn command(cmd: u32) {
             sound::settings_changed(&before, &config::get());
         }
         tray::EQ_EDIT => open_settings(),
+        tray::EQ_APO => sound::open_configurator(),
         tray::QUIT => unsafe {
             let _ = DestroyWindow(main_hwnd());
         },

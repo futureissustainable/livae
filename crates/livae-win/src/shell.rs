@@ -66,6 +66,11 @@ pub fn open_args(target: &str, args: &str) -> bool {
     unsafe { ShellExecuteW(None, w!("open"), &HSTRING::from(target), &HSTRING::from(args), PCWSTR::null(), SW_SHOWNORMAL).0 as isize > 32 }
 }
 
+/// Open a program from its own folder (Qt programs such as Equalizer APO's Configurator find their parts there).
+pub fn open_in(target: &str, dir: &Path) -> bool {
+    unsafe { ShellExecuteW(None, w!("open"), &HSTRING::from(target), PCWSTR::null(), &HSTRING::from(dir.as_os_str()), SW_SHOWNORMAL).0 as isize > 32 }
+}
+
 /// Open a text file; Notepad when `.toml` has no editor yet.
 pub fn edit(path: &Path) {
     let p = path.to_string_lossy();

@@ -21,7 +21,7 @@ use windows::Win32::Media::Audio::{
 };
 use windows::Win32::System::Com::StructuredStorage::PropVariantToStringAlloc;
 use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_ALL, STGM_READ};
-use windows::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RRF_SUBKEY_WOW6464KEY};
+use windows::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_MULTI_SZ, RRF_RT_REG_SZ, RRF_SUBKEY_WOW6464KEY};
 
 use crate::{app, config};
 
@@ -151,6 +151,8 @@ thread_local! {
     /// Livae's recent switches of the output and the microphone, and until when it stands down from fighting.
     static GUARD: RefCell<[(Vec<std::time::Instant>, Option<std::time::Instant>); 2]> = const { RefCell::new([(Vec::new(), None), (Vec::new(), None)]) };
     static STATUS: RefCell<String> = const { RefCell::new(String::new()) };
+    /// The output in use has a profile, but Equalizer APO is not installed on it, so nothing changes its sound.
+    static NO_APO: Cell<bool> = const { Cell::new(false) };
 }
 
 pub fn install() {
@@ -224,8 +226,53 @@ pub fn refresh() {
             switch_to(flow, &d.id);
         }
     }
-    let line = write_apo(&sound, &outputs);
+    let (line, no_apo) = write_apo(&sound, &outputs);
     STATUS.with(|s| *s.borrow_mut() = line);
+    NO_APO.with(|n| n.set(no_apo));
+}
+
+/// Whether the tray offers to install Equalizer APO on the output in use.
+pub fn needs_apo() -> bool {
+    NO_APO.with(Cell::get)
+}
+
+/// Equalizer APO's own Configurator, where an output is added (Windows asks for permission, then a restart).
+pub fn open_configurator() {
+    if let Some(dir) = apo_path("InstallPath") {
+        crate::shell::open_in(&dir.join("DeviceSelector.exe").to_string_lossy(), &dir);
+    }
+}
+
+/// A folder Equalizer APO's installer recorded (64-bit registry view).
+fn apo_path(value: &str) -> Option<PathBuf> {
+    let mut buf = vec![0u16; 1024];
+    let mut size = (buf.len() * 2) as u32;
+    unsafe {
+        RegGetValueW(HKEY_LOCAL_MACHINE, &HSTRING::from("SOFTWARE\\EqualizerAPO"), &HSTRING::from(value), RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY, None, Some(buf.as_mut_ptr().cast()), Some(&mut size))
+    }
+    .ok()
+    .ok()?;
+    let n = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    Some(PathBuf::from(String::from_utf16_lossy(&buf[..n]))).filter(|p| p.is_dir())
+}
+
+/// Whether Windows loads Equalizer APO on `output`: its effect sits in one of the endpoint's effect slots (the
+/// Configurator puts it there). Without it Equalizer APO never sees that output's sound, whatever its config says.
+fn apo_on(output: &Device) -> bool {
+    // Equalizer APO's pre-mix and post-mix effects.
+    const APO: [&str; 2] = ["{EACD2258-FCAC-4FF4-B36D-419E924A6D79}", "{EC1CC9CE-FAED-4822-828A-82A81A6F018F}"];
+    let key = HSTRING::from(format!("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Render\\{}\\FxProperties", output.guid()));
+    // Stream, mode and endpoint effects, the older pre-mix and post-mix slots, and their composite lists.
+    [1, 2, 5, 6, 7, 13, 14, 15].iter().any(|slot| {
+        let mut buf = vec![0u16; 2048];
+        let mut size = (buf.len() * 2) as u32;
+        let name = HSTRING::from(format!("{{d04e05a6-594b-4fb6-a80d-01af5eed7d1d}},{slot}"));
+        let ok = unsafe {
+            RegGetValueW(HKEY_LOCAL_MACHINE, &key, &name, RRF_RT_REG_SZ | RRF_RT_REG_MULTI_SZ | RRF_SUBKEY_WOW6464KEY, None, Some(buf.as_mut_ptr().cast()), Some(&mut size))
+        };
+        let text = String::from_utf16_lossy(&buf[..(size as usize / 2).min(buf.len())]).to_ascii_uppercase();
+        ok.is_ok() && APO.iter().any(|c| text.contains(c))
+    })
 }
 
 /// Equalizer APO's config folder, from its install (64-bit registry view), if it is installed. A test copy uses
@@ -236,31 +283,19 @@ fn apo_folder() -> Option<PathBuf> {
         let _ = std::fs::create_dir_all(&dir);
         return Some(dir);
     }
-    let mut buf = vec![0u16; 1024];
-    let mut size = (buf.len() * 2) as u32;
-    let ok = unsafe {
-        RegGetValueW(HKEY_LOCAL_MACHINE, &HSTRING::from("SOFTWARE\\EqualizerAPO"), &HSTRING::from("ConfigPath"), RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY, None, Some(buf.as_mut_ptr().cast()), Some(&mut size))
-    };
-    if ok.is_ok() {
-        let n = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
-        let path = PathBuf::from(String::from_utf16_lossy(&buf[..n]));
-        if path.is_dir() {
-            return Some(path);
-        }
-    }
-    let fallback = PathBuf::from("C:\\Program Files\\EqualizerAPO\\config");
-    fallback.is_dir().then_some(fallback)
+    apo_path("ConfigPath").or_else(|| Some(PathBuf::from("C:\\Program Files\\EqualizerAPO\\config")).filter(|p| p.is_dir()))
 }
 
-/// `--dump --sound`: the outputs and microphones (connected, in use), the equaliser's status and what Livae
-/// wrote for Equalizer APO.
+/// `--dump --sound`: the outputs and microphones (connected, in use, Equalizer APO installed), the equaliser's
+/// status and what Livae wrote for Equalizer APO.
 pub fn dump() -> String {
     let mut s = String::new();
     for (flow, kind) in [(eRender, "output"), (eCapture, "input")] {
         let used = default_id(flow);
         for d in devices(flow) {
             let mark = if used.as_deref() == Some(d.id.as_str()) { "in use" } else if d.connected { "" } else { "unplugged" };
-            s.push_str(&format!("{kind}\t{}\t{}\t{mark}\n", d.name, d.guid()));
+            let apo = if flow == eRender && apo_on(&d) { "Equalizer APO" } else { "" };
+            s.push_str(&format!("{kind}\t{}\t{}\t{mark}\t{apo}\n", d.name, d.guid()));
         }
     }
     s.push_str(&format!("status\t{}\n", status()));
@@ -272,32 +307,33 @@ pub fn dump() -> String {
     s
 }
 
-/// Write `livae.txt` beside Equalizer APO's `config.txt` and include it there once; the status line to show.
-fn write_apo(sound: &livae_core::sound::Sound, outputs: &[Device]) -> String {
+/// Write `livae.txt` beside Equalizer APO's `config.txt` and include it there once; the status line to show, and
+/// whether the output in use still needs Equalizer APO installed on it.
+fn write_apo(sound: &livae_core::sound::Sound, outputs: &[Device]) -> (String, bool) {
     let wanted = sound.eq && !sound.profiles.is_empty();
     let Some(folder) = apo_folder() else {
-        return if wanted { "Needs Equalizer APO (free) to run".into() } else { "Off".into() };
+        return (if wanted { "Needs Equalizer APO (free) to run" } else { "Off" }.into(), false);
     };
     let named: Vec<(String, String)> = outputs.iter().map(|d| (d.name.clone(), d.guid().to_string())).collect();
     let text = equalizer_apo(sound, &named);
     let mine = folder.join("livae.txt");
     if std::fs::read_to_string(&mine).ok().as_deref() != Some(text.as_str()) && livae_core::write_atomic(&mine, text.as_bytes()).is_err() {
-        return "Cannot write to Equalizer APO's config folder".into();
+        return ("Cannot write to Equalizer APO's config folder".into(), false);
     }
     let main = folder.join("config.txt");
     let current = std::fs::read_to_string(&main).unwrap_or_default();
     let fixed = livae_core::sound::include_livae(&current);
     if fixed != current && livae_core::write_atomic(&main, fixed.as_bytes()).is_err() {
-        return "Cannot add Livae to Equalizer APO's config.txt".into();
+        return ("Cannot add Livae to Equalizer APO's config.txt".into(), false);
     }
     if !sound.eq {
-        return "Off".into();
+        return ("Off".into(), false);
     }
-    let current = default_id(eRender).and_then(|id| outputs.iter().find(|d| d.id == id).cloned());
-    match current.map(|d| (sound.design_for(&d.name), d.name)) {
-        Some((Ok(Some(_)), name)) => format!("On for {name} (Equalizer APO)"),
-        Some((Ok(None), name)) => format!("Nothing to change on {name}"),
-        Some((Err(e), _)) => e,
-        None => "No output".into(),
+    let Some(d) = default_id(eRender).and_then(|id| outputs.iter().find(|d| d.id == id).cloned()) else { return ("No output".into(), false) };
+    match sound.design_for(&d.name) {
+        Ok(Some(_)) if apo_on(&d) => (format!("On for {} (Equalizer APO)", d.name), false),
+        Ok(Some(_)) => (format!("Not running: Equalizer APO is not installed on {}", d.name), true),
+        Ok(None) => (format!("Nothing to change on {}", d.name), false),
+        Err(e) => (e, false),
     }
 }
