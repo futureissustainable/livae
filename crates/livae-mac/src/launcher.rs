@@ -36,7 +36,11 @@ use crate::panel::{Controller, Event, Panel};
 use crate::ui::{self, SECONDARY, TERTIARY, TEXT};
 
 const WIDTH: f64 = 720.0;
-const FIELD_H: f64 = 56.0;
+/// The search capsule: 72 pt tall with a 28 pt query (the macOS 27 Spotlight look).
+const FIELD_H: f64 = 72.0;
+const QUERY: f64 = livae_core::tokens::text::H3.size;
+/// The query starts on the result titles' column (the field draws its text 2 pt in), with or without a scope icon.
+const FIELD_X: f64 = TEXT_X - 2.0;
 /// Space between the capsule and the card.
 const GAP: f64 = 10.0;
 const ROW_H: f64 = 44.0;
@@ -92,6 +96,9 @@ pub struct Launcher {
     field: Retained<NSTextField>,
     field_font: Retained<NSFont>,
     search_icon: Retained<NSImageView>,
+    caret: crate::caret::Caret,
+    /// What Enter does, written after the query: "– Open Safari".
+    hint: Retained<NSTextField>,
     rows: Vec<Row>,
     /// The selected row's band; one view that slides between rows.
     band: Retained<NSBox>,
@@ -176,10 +183,15 @@ pub fn install(mtm: MainThreadMarker) {
     let s = config::get();
 
     let capsule = Glass::new(mtm, FIELD_H / 2.0, s.glass.max(0.35));
-    let (search_icon, field, field_font) = ui::search_field(mtm, &controller, "Search apps and files", WIDTH, 24.0);
+    let (search_icon, field, field_font) = ui::search_field(mtm, &controller, "Search apps and files", WIDTH, QUERY, FIELD_H);
     capsule.content.addSubview(&search_icon);
+    let hint = ui::label(mtm, QUERY, TERTIARY);
+    hint.setFont(Some(&field_font));
+    hint.setLineBreakMode(objc2_app_kit::NSLineBreakMode::ByTruncatingTail);
+    capsule.content.addSubview(&hint);
     capsule.content.addSubview(&field);
 
+    let capsule_content = capsule.content.clone();
     let card = Glass::new(mtm, CARD_RADIUS, s.glass.max(0.35) * 0.8);
     let list = List::new(mtm, Owner::Launcher);
     // No autoresizing: layout() sets the frame; a stretchy mask on top of that shrank it twice inside the glass.
@@ -228,6 +240,8 @@ pub fn install(mtm: MainThreadMarker) {
         field,
         field_font,
         search_icon,
+        caret: crate::caret::Caret::new(mtm, &capsule_content, QUERY + 6.0),
+        hint,
         rows,
         band,
         apps,
@@ -251,6 +265,18 @@ pub fn install(mtm: MainThreadMarker) {
         _list: list,
     };
     LAUNCHER.with(|cell| *cell.borrow_mut() = Some(launcher));
+    // Moving the caret with the arrow keys or the mouse changes no text: follow it here.
+    let moved = block2::RcBlock::new(|_n: std::ptr::NonNull<objc2_foundation::NSNotification>| {
+        with(|l| {
+            if crate::motion::shown(&l.panel) {
+                l.paint_field();
+            }
+        });
+        crate::clipboard::with(|c| c.caret_moved());
+    });
+    let center = objc2_foundation::NSNotificationCenter::defaultCenter();
+    let observer = unsafe { center.addObserverForName_object_queue_usingBlock(Some(objc2_app_kit::NSTextViewDidChangeSelectionNotification), None, None, &moved) };
+    std::mem::forget(observer); // lives as long as the app
     // Holding ⌘ reveals the ⌘1-⌘9 shortcuts; letting go hides them again.
     let flags = block2::RcBlock::new(|event: std::ptr::NonNull<NSEvent>| -> *mut NSEvent {
         let cmd = unsafe { event.as_ref() }.modifierFlags().contains(objc2_app_kit::NSEventModifierFlags::Command);
@@ -295,6 +321,7 @@ impl Launcher {
         ui::present(&self.panel);
         crate::motion::show(&self.panel, crate::motion::DROP);
         self.panel.makeFirstResponder(Some(&self.field));
+        self.paint_field();
     }
 
     /// Apps installed or removed since the last open, found off the main thread so the panel opens at once.
@@ -322,8 +349,12 @@ impl Launcher {
         });
     }
 
+    /// Put `q` in the field with the caret after it.
     pub fn set_query(&mut self, q: &str) {
         self.field.setStringValue(&NSString::from_str(q));
+        if let Some(editor) = self.field.currentEditor() {
+            editor.setSelectedRange(NSRange::new(q.encode_utf16().count(), 0));
+        }
         self.query_changed();
     }
 
@@ -452,13 +483,49 @@ impl Launcher {
     fn set_scope(&mut self, scope: Scope) {
         self.scope = scope;
         let (text, symbol) = match scope {
-            Scope::All => ("Search apps and files", "magnifyingglass"),
-            Scope::Apps => ("Search applications", "square.grid.2x2"),
-            Scope::Files => ("Search files by name", "folder"),
+            Scope::All => ("Search apps and files", None),
+            Scope::Apps => ("Search applications", Some("square.grid.2x2")),
+            Scope::Files => ("Search files by name", Some("folder")),
         };
         self.field.setPlaceholderAttributedString(Some(&ui::placeholder(text, &self.field_font)));
-        if let Some(img) = ui::symbol(symbol) {
+        // No icon for the plain search, as in Spotlight; a scope shows its icon before the query.
+        self.search_icon.setHidden(symbol.is_none());
+        if let Some(img) = symbol.and_then(ui::symbol) {
             self.search_icon.setImage(Some(&img));
+        }
+        let f = self.field.frame();
+        self.field.setFrame(NSRect::new(NSPoint::new(FIELD_X, f.origin.y), NSSize::new(WIDTH - FIELD_X - EDGE - 8.0, f.size.height)));
+    }
+
+    /// What Enter does with the selected row, for the hint after the query.
+    fn enter_hint(&self) -> Option<String> {
+        let item = self.items.get(self.selected)?;
+        let (title, _) = self.texts(self.selected, item);
+        Some(match item {
+            Item::App(_) | Item::File(_) => format!("Open {title}"),
+            Item::Answer(_) => "Copy".into(),
+            Item::Quick(_) | Item::Command(_) | Item::Web(_) => title,
+            Item::Snippet(_) => "Type it".into(),
+            Item::Settings | Item::Clipboard => format!("Open {title}"),
+            Item::Scope { title, .. } => format!("Show {title}"),
+            Item::AllowFolders | Item::Searching | Item::Empty => return None,
+        })
+    }
+
+    /// The caret at the insertion point and, after the query, what Enter does.
+    fn paint_field(&self) {
+        self.caret.place(&self.field);
+        let q = self.field.stringValue().to_string();
+        let hint = (!q.trim().is_empty()).then(|| self.enter_hint()).flatten();
+        let end = crate::caret::text_end(&self.field);
+        match (hint, end) {
+            (Some(h), Some(x)) if WIDTH - EDGE - (x + 10.0) >= 80.0 => {
+                let f = self.field.frame();
+                self.hint.setStringValue(&NSString::from_str(&format!("\u{2013} {h}")));
+                self.hint.setFrame(NSRect::new(NSPoint::new(x + 10.0, f.origin.y), NSSize::new(WIDTH - EDGE - (x + 10.0), f.size.height)));
+                self.hint.setHidden(false);
+            }
+            _ => self.hint.setHidden(true),
         }
     }
 
@@ -743,12 +810,7 @@ impl Launcher {
                 crate::hud::show(&format!("Copied {v}"), NSPoint::new(f.origin.x + WIDTH / 2.0, f.origin.y + f.size.height - FIELD_H / 2.0));
             }
             Item::Quick(Hit::Open { url, .. }) => self.open_url(&url),
-            Item::Quick(Hit::Fill { text, .. }) => {
-                self.set_query(&text);
-                if let Some(editor) = self.field.currentEditor() {
-                    editor.setSelectedRange(NSRange::new(text.encode_utf16().count(), 0));
-                }
-            }
+            Item::Quick(Hit::Fill { text, .. }) => self.set_query(&text),
             Item::Command(def) => {
                 if def.command.confirm() && self.armed != Some(i) {
                     self.armed = Some(i);
@@ -864,6 +926,7 @@ impl Launcher {
             Some(r) => crate::motion::slide(&self.band, r, animate),
             None => self.band.setHidden(true),
         }
+        self.paint_field();
     }
 
     /// Size the window to the capsule plus the card (top edge fixed) and place every view.

@@ -9,6 +9,8 @@ mod apps;
 #[cfg(target_os = "macos")]
 mod breaks;
 #[cfg(target_os = "macos")]
+mod caret;
+#[cfg(target_os = "macos")]
 mod clipboard;
 #[cfg(target_os = "macos")]
 mod config;

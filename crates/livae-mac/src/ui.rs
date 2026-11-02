@@ -56,13 +56,13 @@ pub fn band(mtm: MainThreadMarker, radius: f64) -> Retained<NSBox> {
 }
 
 /// The search capsule's icon and field (`size` pt text, a type-scale step: 24 launcher, 20 clipboard), wired to `controller`.
-pub fn search_field(mtm: MainThreadMarker, controller: &Controller, hint: &str, width: f64, size: f64) -> (Retained<NSImageView>, Retained<NSTextField>, Retained<NSFont>) {
+pub fn search_field(mtm: MainThreadMarker, controller: &Controller, hint: &str, width: f64, size: f64, height: f64) -> (Retained<NSImageView>, Retained<NSTextField>, Retained<NSFont>) {
     let icon = NSImageView::new(mtm);
     if let Some(img) = symbol("magnifyingglass") {
         icon.setImage(Some(&img));
     }
     icon.setContentTintColor(Some(&rgb(SECONDARY)));
-    icon.setFrame(NSRect::new(NSPoint::new(20.0, 17.0), NSSize::new(22.0, 22.0)));
+    icon.setFrame(NSRect::new(NSPoint::new(20.0, (height - 22.0) / 2.0), NSSize::new(22.0, 22.0)));
     let field = NSTextField::textFieldWithString(ns_string!(""), mtm);
     field.setBezeled(false);
     field.setDrawsBackground(false);
@@ -73,7 +73,7 @@ pub fn search_field(mtm: MainThreadMarker, controller: &Controller, hint: &str, 
     field.setPlaceholderAttributedString(Some(&placeholder(hint, &font)));
     unsafe { field.setDelegate(Some(ProtocolObject::from_ref(controller))) };
     let h = size + 8.0;
-    field.setFrame(NSRect::new(NSPoint::new(56.0, (56.0 - h) / 2.0), NSSize::new(width - 56.0 - 20.0, h)));
+    field.setFrame(NSRect::new(NSPoint::new(56.0, (height - h) / 2.0), NSSize::new(width - 56.0 - 20.0, h)));
     (icon, field, font)
 }
 

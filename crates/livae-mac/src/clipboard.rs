@@ -66,6 +66,7 @@ pub struct Clipboard {
     capsule: Glass,
     card: Glass,
     field: Retained<NSTextField>,
+    caret: crate::caret::Caret,
     rows: Vec<Row>,
     /// The selected row's band; one view that slides between rows.
     band: Retained<NSBox>,
@@ -160,12 +161,13 @@ pub fn install(mtm: MainThreadMarker) {
     let s = config::get();
 
     let capsule = Glass::new(mtm, FIELD_H / 2.0, s.glass.max(0.6));
-    let (search_icon, field, _font) = ui::search_field(mtm, &controller, "Search clipboard", WIDTH, 20.0);
+    let (search_icon, field, _font) = ui::search_field(mtm, &controller, "Search clipboard", WIDTH, 20.0, FIELD_H);
     if let Some(img) = ui::symbol("doc.on.clipboard") {
         search_icon.setImage(Some(&img));
     }
     capsule.content.addSubview(&search_icon);
     capsule.content.addSubview(&field);
+    let caret = crate::caret::Caret::new(mtm, &capsule.content, 26.0);
 
     let card = Glass::new(mtm, CARD_RADIUS, s.glass.max(0.6) * 0.85);
     let list = List::new(mtm, Owner::Clipboard);
@@ -225,6 +227,7 @@ pub fn install(mtm: MainThreadMarker) {
         panel,
         capsule,
         card,
+        caret,
         field,
         rows,
         band,
@@ -363,6 +366,14 @@ impl Clipboard {
         // It grows out of the text cursor: from its top edge when it opens below the cursor, else from its bottom.
         crate::motion::show(&self.panel, crate::motion::Pose::new(0.94, 0.0, (0.5, if above { 0.0 } else { 1.0 })));
         self.panel.makeFirstResponder(Some(&self.field));
+        self.caret.place(&self.field);
+    }
+
+    /// The caret moved without a text change (arrow keys, a click in the field).
+    pub fn caret_moved(&self) {
+        if crate::motion::shown(&self.panel) {
+            self.caret.place(&self.field);
+        }
     }
 
     pub fn hide(&mut self) {
@@ -609,6 +620,7 @@ impl Clipboard {
             Some((y, h)) => crate::motion::slide(&self.band, NSRect::new(NSPoint::new(INSET, y), NSSize::new(WIDTH - 2.0 * INSET, h)), animate),
             None => self.band.setHidden(true),
         }
+        self.caret.place(&self.field);
     }
 
     fn layout(&mut self) {
