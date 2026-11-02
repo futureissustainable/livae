@@ -271,7 +271,12 @@ static START: OnceLock<Instant> = OnceLock::new();
 fn dump_tick() {
     let clip = config::flag("--clipboard");
     let waited = START.get().map_or(0, |s| s.elapsed().as_secs());
-    let mut text = if config::flag("--year") {
+    let mut text = if config::flag("--sound") {
+        if waited < 2 {
+            return;
+        }
+        sound::dump()
+    } else if config::flag("--year") {
         year::dump()
     } else if config::flag("--break") {
         if !breaks::settled() && waited < 5 {
@@ -286,7 +291,7 @@ fn dump_tick() {
         }
         if clip { clipboard::dump() } else { launcher::dump() }
     };
-    if !clip && !config::flag("--year") && !config::flag("--break") && !config::flag("--journal") && !launcher::ready() {
+    if !clip && !config::flag("--year") && !config::flag("--break") && !config::flag("--journal") && !config::flag("--sound") && !launcher::ready() {
         text.push_str("# not ready after 15 s\n");
     }
     match config::value("--dump").filter(|v| !v.starts_with("--")) {

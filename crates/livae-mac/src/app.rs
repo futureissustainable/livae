@@ -553,6 +553,9 @@ fn start(mtm: MainThreadMarker, delegate: &AppDelegate) {
         let after = dispatch2::DispatchTime::NOW.time(2_000_000_000);
         let _ = dispatch2::DispatchQueue::main().after(after, move || design_dump(&dir));
     }
+    if args.iter().any(|a| a == "--ask-microphone") {
+        crate::sound::ask_microphone();
+    }
     if args.iter().any(|a| a == "--equalizer") {
         crate::equalizer::show();
     }

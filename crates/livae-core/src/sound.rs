@@ -65,10 +65,12 @@ impl Sound {
     }
 }
 
-/// The Equalizer APO config for the outputs in `devices` (name, endpoint GUID): each output its whole chain (the
-/// profile for every device, then its own) under its own `Device:` line, matched by GUID, never by a name that
-/// another device could share. Equalizer APO has no limiter, so the gain is held where the curve peaks at 0 dB:
-/// a boost uses only the headroom the filters leave, and nothing clips.
+/// The Equalizer APO config for the outputs in `devices` (Windows name, endpoint GUID): each output its whole chain
+/// (the profile for every device, then its own) under its own `Device:` line. Equalizer APO finds every word of a
+/// pattern in "device name, connection name, GUID", so each line names the output twice, by GUID or by its
+/// connection and device names ("Speakers (Realtek(R) Audio)" is connection "Speakers", device "Realtek(R)
+/// Audio"). Equalizer APO has no limiter, so the gain is held where the curve peaks at 0 dB: a boost uses only the
+/// headroom the filters leave, and nothing clips.
 pub fn equalizer_apo(sound: &Sound, devices: &[(String, String)]) -> String {
     let mut out = String::from("# Written by Livae from its settings ([sound]); edits here are replaced. Livae, Settings, Equaliser.\n");
     for (name, guid) in devices {
@@ -78,7 +80,11 @@ pub fn equalizer_apo(sound: &Sound, devices: &[(String, String)]) -> String {
             design.gain_db -= peak;
         }
         let parametric = crate::eq::Parametric { preamp: design.gain_db, filters: design.filters };
-        out.push_str(&format!("Device: {guid}\n"));
+        let words = match name.strip_suffix(')').and_then(|n| n.split_once(" (")) {
+            Some((connection, device)) => format!("{connection} {device}"),
+            None => name.clone(),
+        };
+        out.push_str(&format!("Device: {guid}; {words}\n"));
         for line in crate::eq::format(&parametric).lines() {
             // Equalizer APO numbers nothing: "Filter: ON PK ...".
             let line = match line.split_once(": ON ") {
@@ -90,6 +96,23 @@ pub fn equalizer_apo(sound: &Sound, devices: &[(String, String)]) -> String {
         }
     }
     out.push_str("Device: all\n");
+    out
+}
+
+/// Equalizer APO's `config.txt` with `Include: livae.txt` once, at the end after `Device: all`: Equalizer APO skips
+/// every command that follows a `Device:` line naming another device, so without it Livae's file would load only
+/// for that device.
+pub fn include_livae(config: &str) -> String {
+    let is = |l: &str, what: &str| l.trim().eq_ignore_ascii_case(what);
+    let mut lines: Vec<&str> = config.lines().filter(|l| !is(l, "Include: livae.txt")).collect();
+    while lines.last().is_some_and(|l| l.trim().is_empty() || is(l, "Device: all")) {
+        lines.pop();
+    }
+    let mut out = lines.join("\r\n");
+    if !out.is_empty() {
+        out.push_str("\r\n\r\n");
+    }
+    out.push_str("Device: all\r\nInclude: livae.txt\r\n");
     out
 }
 
@@ -137,9 +160,19 @@ mod tests {
         hp.filters = "Preamp: -3 dB\nFilter 1: ON PK Fc 1000 Hz Gain 4 dB Q 1".into();
         let devices = [("Headphones (Realtek(R) Audio)".to_string(), "{guid-hp}".to_string()), ("Speakers".to_string(), "{guid-sp}".to_string())];
         let text = equalizer_apo(&s, &devices);
-        assert!(text.contains("Device: {guid-hp}\nPreamp: -4 dB\nFilter: ON PK Fc 1000 Hz Gain 4 dB Q 1\n"), "{text}");
+        assert!(text.contains("Device: {guid-hp}; Headphones Realtek(R) Audio\nPreamp: -4 dB\nFilter: ON PK Fc 1000 Hz Gain 4 dB Q 1\n"), "{text}");
         assert!(!text.contains("{guid-sp}") && text.ends_with("Device: all\n"));
         s.eq = false;
         assert!(!equalizer_apo(&s, &devices).contains("Device: {"));
+    }
+
+    #[test]
+    fn livae_loads_for_every_device_whatever_came_before() {
+        // A microphone section ends the owner's file: the include must not run only for that device.
+        let config = "Device: USB Advanced Audio Device\nVSTPlugin: Library \"x.dll\"\nInclude: livae.txt\n";
+        let fixed = include_livae(config);
+        assert!(fixed.ends_with("VSTPlugin: Library \"x.dll\"\r\n\r\nDevice: all\r\nInclude: livae.txt\r\n"), "{fixed}");
+        assert_eq!(include_livae(&fixed), fixed, "once is enough");
+        assert_eq!(include_livae(""), "Device: all\r\nInclude: livae.txt\r\n");
     }
 }

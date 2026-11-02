@@ -629,6 +629,11 @@ pub fn refresh() {
     crate::settings::sound_changed();
 }
 
+/// `--ask-microphone`: show macOS's microphone prompt for Livae now (outputs that have a microphone need it).
+pub fn ask_microphone() {
+    ask(tcc::Service::Microphone);
+}
+
 /// Ask macOS once per run for a permission; refresh with the answer.
 fn ask(service: tcc::Service) {
     let first = STATE.with(|s| {

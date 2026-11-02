@@ -228,8 +228,14 @@ pub fn refresh() {
     STATUS.with(|s| *s.borrow_mut() = line);
 }
 
-/// Equalizer APO's config folder, from its install (64-bit registry view), if it is installed.
+/// Equalizer APO's config folder, from its install (64-bit registry view), if it is installed. A test copy uses
+/// a folder of its own instead, so a check never changes the real equaliser.
 fn apo_folder() -> Option<PathBuf> {
+    if config::test_mode() {
+        let dir = config::data_dir().join("apo");
+        let _ = std::fs::create_dir_all(&dir);
+        return Some(dir);
+    }
     let mut buf = vec![0u16; 1024];
     let mut size = (buf.len() * 2) as u32;
     let ok = unsafe {
@@ -246,6 +252,26 @@ fn apo_folder() -> Option<PathBuf> {
     fallback.is_dir().then_some(fallback)
 }
 
+/// `--dump --sound`: the outputs and microphones (connected, in use), the equaliser's status and what Livae
+/// wrote for Equalizer APO.
+pub fn dump() -> String {
+    let mut s = String::new();
+    for (flow, kind) in [(eRender, "output"), (eCapture, "input")] {
+        let used = default_id(flow);
+        for d in devices(flow) {
+            let mark = if used.as_deref() == Some(d.id.as_str()) { "in use" } else if d.connected { "" } else { "unplugged" };
+            s.push_str(&format!("{kind}\t{}\t{}\t{mark}\n", d.name, d.guid()));
+        }
+    }
+    s.push_str(&format!("status\t{}\n", status()));
+    if let Some(dir) = apo_folder() {
+        for f in ["config.txt", "livae.txt"] {
+            s.push_str(&format!("== {f}\n{}", std::fs::read_to_string(dir.join(f)).unwrap_or_default()));
+        }
+    }
+    s
+}
+
 /// Write `livae.txt` beside Equalizer APO's `config.txt` and include it there once; the status line to show.
 fn write_apo(sound: &livae_core::sound::Sound, outputs: &[Device]) -> String {
     let wanted = sound.eq && !sound.profiles.is_empty();
@@ -260,11 +286,9 @@ fn write_apo(sound: &livae_core::sound::Sound, outputs: &[Device]) -> String {
     }
     let main = folder.join("config.txt");
     let current = std::fs::read_to_string(&main).unwrap_or_default();
-    if !current.lines().any(|l| l.trim().eq_ignore_ascii_case("Include: livae.txt")) {
-        let joined = format!("{}{}Include: livae.txt\r\n", current, if current.is_empty() || current.ends_with('\n') { "" } else { "\r\n" });
-        if livae_core::write_atomic(&main, joined.as_bytes()).is_err() {
-            return "Cannot add Livae to Equalizer APO's config.txt".into();
-        }
+    let fixed = livae_core::sound::include_livae(&current);
+    if fixed != current && livae_core::write_atomic(&main, fixed.as_bytes()).is_err() {
+        return "Cannot add Livae to Equalizer APO's config.txt".into();
     }
     if !sound.eq {
         return "Off".into();
