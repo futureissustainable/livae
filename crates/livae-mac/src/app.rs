@@ -395,9 +395,15 @@ fn start(mtm: MainThreadMarker, delegate: &AppDelegate) {
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
 
     let status = NSStatusBar::systemStatusBar().statusItemWithLength(NSVariableStatusItemLength);
-    // A test copy keeps its menu (for checks) but never shows a second mark in the owner's menu bar.
+    // A test copy keeps its menu (for checks) but never shows a second mark in the owner's menu bar. macOS saves
+    // a mark's visibility under its autosave name in the app's defaults, which test copies share with the real
+    // Livae: hiding under the default name hid the real mark too. So a test copy hides under a name of its own,
+    // and the real Livae always shows its mark (its menu is the only way to Settings and Quit).
     if test_mode() {
+        status.setAutosaveName(Some(ns_string!("Livae test copy")));
         status.setVisible(false);
+    } else {
+        status.setVisible(true);
     }
     // Four groups: open (search, the clipboard and its pause), today (journal, year), what runs (breaks,
     // equaliser), the app. Each status sits under its item as a subtitle, never as a row of its own.
