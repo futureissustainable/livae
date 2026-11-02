@@ -395,6 +395,10 @@ fn start(mtm: MainThreadMarker, delegate: &AppDelegate) {
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
 
     let status = NSStatusBar::systemStatusBar().statusItemWithLength(NSVariableStatusItemLength);
+    // A test copy keeps its menu (for checks) but never shows a second mark in the owner's menu bar.
+    if test_mode() {
+        status.setVisible(false);
+    }
     // Four groups: open (search, the clipboard and its pause), today (journal, year), what runs (breaks,
     // equaliser), the app. Each status sits under its item as a subtitle, never as a row of its own.
     let menu = NSMenu::new(mtm);
