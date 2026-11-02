@@ -8,6 +8,15 @@ Written in Rust, native on macOS (Liquid Glass) and Windows 11, true black and q
 
 - **Search** (Opt+Space on the Mac, Alt+Space on Windows): apps, files, system settings, maths and units. Enter opens, Cmd/Ctrl+Enter
   shows the file in its folder.
+- **Money and time**: `100 eur to ron` at the European Central Bank's daily rates (kept on disk, so it works
+  offline), `time in tokyo`, `10am london` in your time, `9:30 pst to berlin`. Enter copies the answer.
+- **Commands**: lock, sleep, turn off displays, restart, shut down, log out, empty the trash, toggle dark mode,
+  quit or force quit the app in front. Ones that lose work ask for a second Enter.
+- **Window manager**: halves, thirds, two thirds, quarters, maximize, center, next display and restore for the window
+  in front, from search or your own shortcuts.
+- **Quicklinks**: a keyword, a space and words (`gh livae`, `yt lofi`, `maps cluj`) search that site. Add your own.
+- **Text expansion** (off until you turn it on), as in Espanso: type `:date`, `:time` or your own trigger in any app
+  and it becomes the text. Snippets can hold the date, the time, the copied text and where the cursor ends.
 - **Clipboard history** (Shift+Cmd+C, Win+Shift+V): text, links, colours, images and files in one list, opened at your
   text cursor. Pin what you keep; copies from password managers are never recorded.
 - **Breaks** (off until you turn them on): a calm full-screen pause with a quote, on a Stretchly-like schedule, that
@@ -20,6 +29,13 @@ Written in Rust, native on macOS (Liquid Glass) and Windows 11, true black and q
   sites. With Livae installed it takes its sites, waits and quotes from Livae.
 
 ![Year](assets/screenshots/year.png)
+
+## Upcoming
+
+- **Focus**: block distracting apps and sites across the whole system for a session, not only in the browser as
+  Livae for Zen does today.
+
+Well-made pull requests are welcome for this and anything in the same spirit; see `CONTRIBUTING.md`.
 
 ## Install
 
@@ -39,7 +55,27 @@ Everything is in one file (the Mac also has a Settings window):
 - Windows: `%APPDATA%\Livae\settings.toml`
 
 Shortcuts, glass darkness, clipboard size, ignored apps, the `[breaks]` and `[journal]` tables (`enabled = true` to
-turn them on) and Livae for Zen's sites all live there. Break quotes are in `quotes.md` next to it.
+turn them on) and Livae for Zen's sites all live there. Break quotes are in `quotes.md` next to it. A saved edit
+applies within a few seconds.
+
+```toml
+currency = "RON"          # what money answers convert to when none is named; empty: your region's
+expansion = true          # text expansion on
+
+[[snippets]]
+trigger = ";sig"
+text = "Best,\nAna{cursor}"   # also {date}, {date:%A}, {time}, {clipboard}
+
+[[quicklinks]]
+name = "Crates"
+keyword = "cr"
+url = "https://crates.io/search?q={query}"
+
+[hotkeys]                 # any command by id, see the comment at the top of the file
+left-half = "Ctrl+Opt+Left"
+right-half = "Ctrl+Opt+Right"
+lock-screen = "Hyper+L"
+```
 
 ## Build
 

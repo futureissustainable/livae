@@ -66,7 +66,7 @@ pub fn request_folders(done: fn()) {
     });
 }
 
-fn attribute(element: &AXUIElement, name: &str) -> Option<CFRetained<CFType>> {
+pub fn attribute(element: &AXUIElement, name: &str) -> Option<CFRetained<CFType>> {
     let mut out: *const CFType = std::ptr::null();
     let err = unsafe { element.copy_attribute_value(&CFString::from_str(name), NonNull::from(&mut out)) };
     if err != AXError::Success || out.is_null() {

@@ -85,18 +85,31 @@ fn prefix(lower: &str, query_lower: &str) -> u32 {
 }
 
 /// Indices by score, best first; ties go to the shorter text.
-fn best(mut hits: Vec<(u32, usize)>, len: impl Fn(usize) -> usize) -> Vec<usize> {
+fn best(hits: Vec<(u32, usize)>, len: impl Fn(usize) -> usize) -> Vec<usize> {
+    sorted(hits, len).into_iter().map(|(_, i)| i).collect()
+}
+
+fn sorted(mut hits: Vec<(u32, usize)>, len: impl Fn(usize) -> usize) -> Vec<(u32, usize)> {
     hits.sort_by(|a, b| b.0.cmp(&a.0).then(len(a.1).cmp(&len(b.1))));
-    hits.into_iter().map(|(_, i)| i).collect()
+    hits
 }
 
 /// Like `rank`, for items with hidden search words: `(name, words)`. The name counts first (an exact name beats a
 /// name that starts with the query, which beats one that merely contains it); the words only find an item whose name
 /// does not match ("wifi" finds Wi-Fi, "dark mode" finds Colors). Ties go to the shorter name.
 pub fn rank_words<N: AsRef<str>, W: AsRef<str>>(query: &str, items: &[(N, W)], boost: impl Fn(usize) -> u32) -> Vec<usize> {
+    if query.trim().is_empty() {
+        return (0..items.len()).collect();
+    }
+    rank_words_scored(query, items, boost).into_iter().map(|(_, i)| i).collect()
+}
+
+/// `rank_words` with each item's score, best first, so lists ranked apart (apps, commands, quicklinks) can be
+/// merged into one order. An empty query matches nothing.
+pub fn rank_words_scored<N: AsRef<str>, W: AsRef<str>>(query: &str, items: &[(N, W)], boost: impl Fn(usize) -> u32) -> Vec<(u32, usize)> {
     let query = query.trim();
     if query.is_empty() {
-        return (0..items.len()).collect();
+        return Vec::new();
     }
     let ql = query.to_lowercase();
     let mut matcher = Matcher::new(Config::DEFAULT);
@@ -121,12 +134,12 @@ pub fn rank_words<N: AsRef<str>, W: AsRef<str>>(query: &str, items: &[(N, W)], b
             Some((score + boost(i), i))
         })
         .collect();
-    best(hits, |i| items[i].0.as_ref().len())
+    sorted(hits, |i| items[i].0.as_ref().len())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{rank, Cache};
+    use super::{rank, rank_words_scored, Cache};
 
     #[test]
     fn cache_ranks_as_rank_does() {
@@ -150,6 +163,16 @@ mod tests {
         assert_eq!(apps[r[0]], "Google Chrome");
         assert!(rank("zzz", &apps, |_| 0).is_empty());
         assert_eq!(rank("  ", &apps, |_| 0).len(), apps.len());
+    }
+
+    #[test]
+    fn scored_words_merge_across_lists() {
+        let apps = [("Battery", "sleep energy")];
+        let commands = [("Sleep", "suspend"), ("Turn Off Displays", "sleep displays")];
+        let (a, c) = (rank_words_scored("sleep", &apps, |_| 0), rank_words_scored("sleep", &commands, |_| 0));
+        // The command named Sleep beats an app that only lists "sleep" among its hidden words.
+        assert!(c[0].0 > a[0].0 && c[0].1 == 0);
+        assert!(rank_words_scored(" ", &apps, |_| 0).is_empty());
     }
 
     #[test]

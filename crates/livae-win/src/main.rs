@@ -12,6 +12,8 @@ mod clipboard;
 #[cfg(windows)]
 mod config;
 #[cfg(windows)]
+mod expand;
+#[cfg(windows)]
 mod gate;
 #[cfg(windows)]
 mod glass;
@@ -24,7 +26,11 @@ mod launcher;
 #[cfg(windows)]
 mod shell;
 #[cfg(windows)]
+mod system;
+#[cfg(windows)]
 mod tray;
+#[cfg(windows)]
+mod winmgr;
 #[cfg(windows)]
 mod year;
 

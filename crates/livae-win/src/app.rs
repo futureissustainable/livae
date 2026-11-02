@@ -27,7 +27,7 @@ use windows::Win32::System::Threading::{CreateMutexW, GetCurrentProcessId};
 use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-use crate::{breaks, clipboard, config, gate, glass, hotkeys, journal, launcher, shell, tray, year};
+use crate::{breaks, clipboard, config, expand, gate, glass, hotkeys, journal, launcher, shell, tray, year};
 
 const WM_RUN: u32 = WM_APP + 2;
 const WM_HOTKEY_PRESSED: u32 = WM_APP + 3;
@@ -202,6 +202,7 @@ pub fn run() {
     config::ensure_file();
     launcher::install();
     clipboard::install();
+    expand::apply(&config::get());
     breaks::install();
     if !config::test_mode() {
         tray::add(hwnd);
@@ -295,8 +296,11 @@ fn dump_tick() {
 /// Every 5 s: settings edited on disk, shortcuts another app released, the tray state.
 fn tick() {
     if let Some((before, after)) = config::reload() {
-        if before.launcher != after.launcher || before.clipboard != after.clipboard {
+        if before.launcher != after.launcher || before.clipboard != after.clipboard || before.hotkeys != after.hotkeys {
             hotkeys::apply(&after);
+        }
+        if before.expansion != after.expansion || before.snippets != after.snippets {
+            expand::apply(&after);
         }
         launcher::settings_changed(&before, &after);
         clipboard::settings_changed(&before, &after);
@@ -378,8 +382,13 @@ extern "system" fn main_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARA
                 match hotkeys::target(wparam.0 as u32) {
                     Some(hotkeys::Target::Launcher) => launcher::toggle(),
                     Some(hotkeys::Target::Clipboard) => clipboard::toggle(),
+                    Some(hotkeys::Target::Command(command)) => run_command(command, GetForegroundWindow()),
                     None => {}
                 }
+                LRESULT(0)
+            }
+            expand::WM_EXPAND => {
+                expand::flush();
                 LRESULT(0)
             }
             WM_FORWARD => {
@@ -433,6 +442,7 @@ extern "system" fn main_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARA
                 LRESULT(0)
             }
             WM_DESTROY => {
+                expand::stop();
                 if !config::test_mode() {
                     tray::remove(hwnd);
                     let _ = RemoveClipboardFormatListener(hwnd);
@@ -457,3 +467,10 @@ extern "system" fn main_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARA
     }
 }
 
+/// Both launcher rows and global shortcuts use the same main-thread action route.
+pub fn run_command(command: livae_core::commands::Command, front: HWND) {
+    match command {
+        livae_core::commands::Command::System(action) => crate::system::run(action, front),
+        livae_core::commands::Command::Window(action) => crate::winmgr::run(action, front),
+    }
+}

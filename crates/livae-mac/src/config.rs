@@ -1,12 +1,15 @@
 //! Livae's settings, kept in `~/Library/Application Support/Livae/settings.toml` and edited in the Settings window.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
 /// Breaks and the journal have the same table on the PC; their types live in the core.
 pub use livae_core::settings::{Breaks, Habit, Journal};
+use livae_core::{quicklinks::Quicklink, snippets::Snippet};
 
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -33,6 +36,14 @@ pub struct Settings {
     pub gate: Gate,
     /// Apps whose copies the clipboard never records (bundle ids, e.g. "com.apple.keychainaccess").
     pub ignore_apps: Vec<String>,
+    /// Currency for money answers when none is named; empty: the system's region decides.
+    pub currency: String,
+    /// Text expansion: typed triggers become their snippet in any app (needs Accessibility).
+    pub expansion: bool,
+    pub snippets: Vec<Snippet>,
+    pub quicklinks: Vec<Quicklink>,
+    /// Shortcuts for launcher commands by id ("left-half" = "Hyper+Left").
+    pub hotkeys: BTreeMap<String, String>,
 }
 
 /// A pause before a site: `seconds` the first time each day, `step` more for every pass that day.
@@ -90,6 +101,11 @@ impl Default for Settings {
             journal: c.journal,
             gate: Gate::default(),
             ignore_apps: c.ignore_apps,
+            currency: c.currency,
+            expansion: c.expansion,
+            snippets: c.snippets,
+            quicklinks: c.quicklinks,
+            hotkeys: c.hotkeys,
         }
     }
 }
@@ -106,7 +122,7 @@ pub fn support_dir() -> PathBuf {
     dir
 }
 
-fn file() -> PathBuf {
+pub fn file() -> PathBuf {
     support_dir().join("settings.toml")
 }
 
@@ -120,18 +136,55 @@ impl Settings {
             .collect();
         if roots.is_empty() { vec![home()] } else { roots }
     }
+
+    /// The currency money answers convert to when none is named: the setting, else the system's region.
+    pub fn currency(&self) -> String {
+        if !self.currency.trim().is_empty() {
+            return self.currency.trim().to_uppercase();
+        }
+        objc2_foundation::NSLocale::currentLocale().currencyCode().map(|c| c.to_string()).unwrap_or_else(|| "EUR".into())
+    }
 }
 
 thread_local! {
     static CURRENT: RefCell<Option<Settings>> = const { RefCell::new(None) };
+    /// The file's change time when last read or written, so `reload` sees only edits made outside Livae.
+    static STAMP: Cell<Option<SystemTime>> = const { Cell::new(None) };
+}
+
+fn stamp() -> Option<SystemTime> {
+    std::fs::metadata(file()).and_then(|m| m.modified()).ok()
+}
+
+fn read() -> Option<Settings> {
+    std::fs::read_to_string(file()).ok().and_then(|t| toml::from_str(&t).ok())
 }
 
 pub fn get() -> Settings {
     CURRENT.with(|c| {
         c.borrow_mut()
-            .get_or_insert_with(|| std::fs::read_to_string(file()).ok().and_then(|t| toml::from_str(&t).ok()).unwrap_or_default())
+            .get_or_insert_with(|| {
+                STAMP.with(|s| s.set(stamp()));
+                read().unwrap_or_default()
+            })
             .clone()
     })
+}
+
+/// Apply an edit made to the file outside Livae (snippets, quicklinks, hotkeys). A file that does not parse keeps
+/// the settings in use until the next good save. Called every few seconds.
+pub fn reload() {
+    if crate::app::test_mode() || STAMP.with(|s| s.get()) == stamp() {
+        return;
+    }
+    STAMP.with(|s| s.set(stamp()));
+    let Some(fresh) = read() else { return };
+    let before = get();
+    if fresh != before {
+        CURRENT.with(|c| *c.borrow_mut() = Some(fresh.clone()));
+        crate::app::settings_changed(&before, &fresh);
+        crate::settings::refresh();
+    }
 }
 
 /// Change the settings, save them, and let every part of the app pick them up.
@@ -148,8 +201,18 @@ pub fn update(f: impl FnOnce(&mut Settings)) {
         return;
     }
     if let Ok(text) = toml::to_string_pretty(&s) {
-        let _ = livae_core::write_atomic(&file(), format!("# Livae settings. Change them in Livae → Settings.\n\n{text}").as_bytes());
+        let _ = livae_core::write_atomic(&file(), format!("{HEADER}{text}").as_bytes());
+        STAMP.with(|st| st.set(stamp()));
     }
     CURRENT.with(|c| *c.borrow_mut() = Some(s.clone()));
     crate::app::settings_changed(&before, &s);
 }
+
+const HEADER: &str = "# Livae settings. Change them in Livae → Settings, or here (Livae applies a saved edit within seconds).\n\
+# currency: what money answers convert to when none is named (\"RON\", \"USD\"); empty: your region's.\n\
+# expansion + [[snippets]]: type a trigger in any app and it becomes the text; {date} {time} {clipboard} {cursor} fill in.\n\
+# [[quicklinks]]: the keyword, a space and words open the url with {query} replaced (\"gh livae\").\n\
+# [hotkeys]: a shortcut for any launcher command, by id: left-half = \"Ctrl+Opt+Left\", lock-screen = \"Hyper+L\".\n\
+#   Window: left-half right-half top-half bottom-half maximize almost-maximize center left-third center-third right-third\n\
+#   left-two-thirds right-two-thirds top-left top-right bottom-left bottom-right next-display restore.\n\
+#   System: lock-screen sleep displays-off restart shut-down log-out empty-trash eject dark-mode quit-app force-quit-app.\n\n";

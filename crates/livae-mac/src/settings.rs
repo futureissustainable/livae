@@ -56,6 +56,8 @@ struct Ui {
     private_status: Retained<NSTextField>,
     private_allow: Retained<NSButton>,
     login: Retained<NSSwitch>,
+    expansion: Retained<NSSwitch>,
+    expansion_status: Retained<NSTextField>,
     /// The scroll view when the content is taller than the screen; every open starts at the top.
     scroll: Option<Retained<NSScrollView>>,
     _target: Retained<Target>,
@@ -269,6 +271,35 @@ define_class!(
             refresh();
         }
 
+        #[unsafe(method(expansionToggled:))]
+        fn expansion_toggled(&self, sender: Option<&AnyObject>) {
+            if let Some(sw) = sender.and_then(|s| s.downcast_ref::<NSSwitch>()) {
+                let on = sw.state() == NSControlStateValueOn;
+                if on && !crate::access::trusted() {
+                    crate::access::request();
+                }
+                config::update(|s| s.expansion = on);
+                refresh();
+            }
+        }
+
+        /// Snippets, quicklinks and command shortcuts are edited in the file; a saved edit applies within seconds.
+        #[unsafe(method(editFile:))]
+        fn edit_file(&self, _s: Option<&AnyObject>) {
+            let url = objc2_foundation::NSURL::fileURLWithPath(&NSString::from_str(&config::file().to_string_lossy()));
+            let ws = objc2_app_kit::NSWorkspace::sharedWorkspace();
+            if let Some(editor) = ws.URLForApplicationWithBundleIdentifier(ns_string!("com.apple.TextEdit")) {
+                ws.openURLs_withApplicationAtURL_configuration_completionHandler(
+                    &objc2_foundation::NSArray::from_retained_slice(&[url]),
+                    &editor,
+                    &objc2_app_kit::NSWorkspaceOpenConfiguration::configuration(),
+                    None,
+                );
+            } else {
+                ws.openURL(&url);
+            }
+        }
+
         #[unsafe(method(loginToggled:))]
         fn login_toggled(&self, sender: Option<&AnyObject>) {
             if let Some(sw) = sender.and_then(|s| s.downcast_ref::<NSSwitch>()) {
@@ -397,6 +428,18 @@ pub fn refresh() {
         let names: Vec<String> = s.file_search.iter().map(|f| if f == "~" { "Home folder".to_string() } else { f.clone() }).collect();
         folders.setStringValue(&NSString::from_str(&names.join(", ")));
         login.setState(if crate::access::open_at_login() { NSControlStateValueOn } else { NSControlStateValueOff });
+        if let Some((sw, status)) = u.borrow().as_ref().map(|ui| (ui.expansion.clone(), ui.expansion_status.clone())) {
+            sw.setState(if s.expansion { NSControlStateValueOn } else { NSControlStateValueOff });
+            let first = s.snippets.first().map(|x| format!(", e.g. {}", x.trigger)).unwrap_or_default();
+            let line = if !s.expansion {
+                "Snippets, quicklinks and command shortcuts are in the file".to_string()
+            } else if crate::access::trusted() {
+                format!("On: {} snippets{first}", s.snippets.len())
+            } else {
+                "Needs Accessibility permission".to_string()
+            };
+            status.setStringValue(&NSString::from_str(&line));
+        }
     });
 }
 
@@ -441,7 +484,8 @@ fn build(mtm: MainThreadMarker) {
     // Title, seven sections, the rows below them, the version line.
     let breaks_rows = 4.0 * ROW + (ROW - 16.0);
     let journal_rows = 2.0 * ROW + (ROW - 16.0);
-    let rows = 2.0 * ROW + ROW + (ROW + (ROW - 12.0) + ROW + ROW + ROW + (ROW - 16.0)) + (ROW + (ROW - 16.0) + (ROW - 12.0) + ROW) + breaks_rows + journal_rows + ROW;
+    let general_rows = ROW + ROW + (ROW - 12.0);
+    let rows = 2.0 * ROW + ROW + (ROW + (ROW - 12.0) + ROW + ROW + ROW + (ROW - 16.0)) + (ROW + (ROW - 16.0) + (ROW - 12.0) + ROW) + breaks_rows + journal_rows + general_rows;
     // The title starts below the traffic lights (TITLEBAR).
     let h = TITLEBAR + 28.0 + 7.0 * SECTION + rows + 16.0 + 18.0 + PAD;
     // Taller than the screen: the same content in a scroll view, the window as tall as fits.
@@ -678,6 +722,21 @@ fn build(mtm: MainThreadMarker) {
         login.setAction(Some(sel!(loginToggled:)));
     }
     right(&login, 40.0, y, 22.0);
+    y -= ROW;
+    label_at("Text expansion", y);
+    let expansion = NSSwitch::new(mtm);
+    expansion.setState(if s.expansion { NSControlStateValueOn } else { NSControlStateValueOff });
+    unsafe {
+        expansion.setTarget(tgt);
+        expansion.setAction(Some(sel!(expansionToggled:)));
+    }
+    right(&expansion, 40.0, y, 22.0);
+    y -= ROW - 12.0;
+    let expansion_status = text(mtm, "", 14.0, tokens::color::dark::TEXT_SECONDARY);
+    expansion_status.setFrame(NSRect::new(NSPoint::new(PAD, y + 14.0), NSSize::new(W - 2.0 * PAD - 110.0, 18.0)));
+    v.addSubview(&expansion_status);
+    let edit = unsafe { NSButton::buttonWithTitle_target_action(ns_string!("Edit file…"), tgt, Some(sel!(editFile:)), mtm) };
+    right(&edit, 100.0, y, 28.0);
 
     // Shortcut recording: the next key press in this window becomes the shortcut; Esc cancels.
     let handler = RcBlock::new(|event: NonNull<NSEvent>| -> *mut NSEvent {
@@ -702,6 +761,6 @@ fn build(mtm: MainThreadMarker) {
 
     window.setDelegate(Some(ProtocolObject::from_ref(&*target)));
     UI.with(|u| {
-        *u.borrow_mut() = Some(Ui { window, glass, launcher, clipboard, paste_status, allow, folders, home_only: reset, ignored, ignore_reset, history_count, breaks_status, journal_status, private_status, private_allow, login, scroll: scroll_view, _target: target, _monitor: monitor })
+        *u.borrow_mut() = Some(Ui { window, glass, launcher, clipboard, paste_status, allow, folders, home_only: reset, ignored, ignore_reset, history_count, breaks_status, journal_status, private_status, private_allow, login, expansion, expansion_status, scroll: scroll_view, _target: target, _monitor: monitor })
     });
 }

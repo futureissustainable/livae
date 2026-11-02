@@ -1,18 +1,26 @@
+pub mod answers;
 pub mod blur;
 pub mod breaks;
 pub mod calc;
 pub mod clip;
+pub mod commands;
+pub mod currency;
 pub mod field;
 pub mod files;
 pub mod history;
 pub mod journal;
+pub mod quicklinks;
+pub mod rows;
 pub mod search;
 pub mod settings;
 pub mod shortcut;
+pub mod snippets;
 pub mod system_settings;
+pub mod timezones;
 pub mod tokens;
 pub mod units;
 pub mod usage;
+pub mod window;
 
 use std::io;
 use std::path::Path;

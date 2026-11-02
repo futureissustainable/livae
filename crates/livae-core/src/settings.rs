@@ -1,5 +1,6 @@
 //! Livae's settings, the same `settings.toml` fields on the Mac and the PC. Only the defaults differ.
 
+use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -41,6 +42,14 @@ pub struct Settings {
     pub breaks: Breaks,
     /// The evening journal (the Vesper prompt).
     pub journal: Journal,
+    /// Currency for money answers when none is named ("100 usd"); empty: the system's region decides.
+    pub currency: String,
+    /// Text expansion: typed triggers become their snippet in any app (off until turned on).
+    pub expansion: bool,
+    pub snippets: Vec<crate::snippets::Snippet>,
+    pub quicklinks: Vec<crate::quicklinks::Quicklink>,
+    /// Shortcuts for launcher commands by id: "left-half" = "Hyper+Left", "lock-screen" = "Ctrl+Opt+L".
+    pub hotkeys: BTreeMap<String, String>,
 }
 
 impl Settings {
@@ -64,6 +73,11 @@ impl Settings {
             ignore_apps,
             breaks: Breaks::default(),
             journal: Journal::defaults_for(platform),
+            currency: String::new(),
+            expansion: false,
+            snippets: crate::snippets::defaults(),
+            quicklinks: crate::quicklinks::defaults(),
+            hotkeys: BTreeMap::new(),
         }
     }
 }
@@ -248,6 +262,21 @@ mod tests {
         let s = parse("glass = 0.5\n[breaks]\nmini_every_min = 90\n[journal]\nat = \"21:30\"\n").unwrap();
         assert_eq!((s.breaks.rules().every, s.breaks.mini_seconds, s.journal.schedule().at.to_string()), (5400.0, 20, "21:30:00".into()));
         assert_eq!(s.journal.habits, Journal::default().habits);
+    }
+
+    #[test]
+    fn snippets_quicklinks_and_hotkeys_tables() {
+        let s = parse("expansion = true\n[[snippets]]\ntrigger = \";sig\"\ntext = \"Best, M\"\n[hotkeys]\nleft-half = \"Hyper+Left\"\n").unwrap();
+        assert!(s.expansion);
+        assert_eq!(s.snippets, vec![crate::snippets::Snippet { trigger: ";sig".into(), text: "Best, M".into() }]);
+        assert_eq!(s.hotkeys.get("left-half").map(String::as_str), Some("Hyper+Left"));
+        // Untouched lists keep their defaults; an emptied one stays empty.
+        assert_eq!(s.quicklinks, crate::quicklinks::defaults());
+        assert!(parse("quicklinks = []").unwrap().quicklinks.is_empty());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        save(&path, &s, "").unwrap();
+        assert_eq!(load(&path), s);
     }
 
     #[test]

@@ -2,6 +2,7 @@
 //! monitor, and live reaction to settings changes.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -19,8 +20,6 @@ use objc2_foundation::{ns_string, MainThreadMarker, NSData, NSNotification, NSOb
 
 use crate::config::{self, Settings};
 
-/// Hyper = the four modifiers Caps Lock sends through Karabiner.
-const HYPER: Modifiers = Modifiers::META.union(Modifiers::CONTROL).union(Modifiers::ALT).union(Modifiers::SHIFT);
 
 static LAUNCHER_ID: AtomicU32 = AtomicU32::new(0);
 static CLIPBOARD_ID: AtomicU32 = AtomicU32::new(0);
@@ -36,27 +35,26 @@ pub fn offscreen() -> bool {
     test_mode() && std::env::args().any(|a| a == "--offscreen")
 }
 
-/// "Hyper+Space", "Cmd+Shift+L", … ; anything unreadable falls back to `fallback`.
-fn parse_shortcut(text: &str, fallback: HotKey) -> HotKey {
+/// "Hyper+Space", "Cmd+Shift+L", "Ctrl+Opt+Left" (Hyper = the four modifiers Caps Lock sends through Karabiner).
+fn hotkey(text: &str) -> Option<HotKey> {
+    use livae_core::shortcut::{self, Key};
+    let s = shortcut::parse(text, shortcut::HYPER_MAC)?;
     let mut mods = Modifiers::empty();
-    let mut code = None;
-    for part in text.split('+').map(|p| p.trim().to_lowercase()) {
-        match part.as_str() {
-            "hyper" => mods |= HYPER,
-            "cmd" | "command" => mods |= Modifiers::META,
-            "ctrl" | "control" => mods |= Modifiers::CONTROL,
-            "opt" | "option" | "alt" => mods |= Modifiers::ALT,
-            "shift" => mods |= Modifiers::SHIFT,
-            "space" => code = Some(Code::Space),
-            k if k.len() == 1 && k.chars().all(|c| c.is_ascii_alphabetic()) => code = format!("Key{}", k.to_uppercase()).parse().ok(),
-            k if k.len() == 1 && k.chars().all(|c| c.is_ascii_digit()) => code = format!("Digit{k}").parse().ok(),
-            _ => {}
-        }
-    }
-    match code {
-        Some(c) if !mods.is_empty() => HotKey::new(Some(mods), c),
-        _ => fallback,
-    }
+    mods.set(Modifiers::CONTROL, s.mods.ctrl);
+    mods.set(Modifiers::ALT, s.mods.alt);
+    mods.set(Modifiers::SHIFT, s.mods.shift);
+    mods.set(Modifiers::META, s.mods.meta);
+    let code = match s.key {
+        Key::Space => Code::Space,
+        Key::Letter(c) => format!("Key{c}").parse().ok()?,
+        Key::Digit(d) => format!("Digit{d}").parse().ok()?,
+        Key::Left => Code::ArrowLeft,
+        Key::Right => Code::ArrowRight,
+        Key::Up => Code::ArrowUp,
+        Key::Down => Code::ArrowDown,
+        Key::Return => Code::Enter,
+    };
+    Some(HotKey::new(Some(mods), code))
 }
 
 struct Shortcuts {
@@ -97,24 +95,30 @@ thread_local! {
     static JOURNAL_STATUS: RefCell<Option<Retained<NSMenuItem>>> = const { RefCell::new(None) };
     static SHORTCUTS: RefCell<Option<Shortcuts>> = const { RefCell::new(None) };
     static KEEP: RefCell<Vec<Retained<AnyObject>>> = const { RefCell::new(Vec::new()) };
-}
-
-fn wanted(s: &Settings) -> (HotKey, HotKey) {
-    let launcher = parse_shortcut(&s.launcher, HotKey::new(Some(Modifiers::ALT), Code::Space));
-    let clipboard = parse_shortcut(&s.clipboard, HotKey::new(Some(Modifiers::META | Modifiers::SHIFT), Code::KeyC));
-    (launcher, clipboard)
+    /// Hotkey id to the launcher command it runs (`[hotkeys]` in the settings).
+    static COMMANDS: RefCell<HashMap<u32, &'static livae_core::commands::Def>> = RefCell::new(HashMap::new());
 }
 
 fn apply_shortcuts() {
-    let (launcher, clipboard) = wanted(&config::get());
+    let s = config::get();
+    // Anything unreadable falls back to the defaults: Opt+Space and Shift+Cmd+C.
+    let launcher = hotkey(&s.launcher).unwrap_or(HotKey::new(Some(Modifiers::ALT), Code::Space));
+    let clipboard = hotkey(&s.clipboard).unwrap_or(HotKey::new(Some(Modifiers::META | Modifiers::SHIFT), Code::KeyC));
     LAUNCHER_ID.store(launcher.id(), Ordering::SeqCst);
     CLIPBOARD_ID.store(clipboard.id(), Ordering::SeqCst);
+    let platform = livae_core::settings::Platform::Mac;
+    let commands: Vec<(HotKey, &'static livae_core::commands::Def)> = s
+        .hotkeys
+        .iter()
+        .filter_map(|(id, text)| Some((hotkey(text)?, livae_core::commands::all(platform).find(|d| d.id.eq_ignore_ascii_case(id.trim()))?)))
+        .collect();
+    COMMANDS.with(|c| *c.borrow_mut() = commands.iter().map(|(hk, d)| (hk.id(), *d)).collect());
     SHORTCUTS.with(|cell| {
         if let Some(s) = cell.borrow_mut().as_mut() {
             for hk in s.active.drain(..) {
                 let _ = s.manager.unregister(hk);
             }
-            s.pending = vec![launcher, clipboard];
+            s.pending = [launcher, clipboard].into_iter().chain(commands.iter().map(|(hk, _)| *hk)).collect();
             s.suspended = false;
         }
     });
@@ -172,8 +176,11 @@ fn claim_pending() {
 
 /// Called by `config::update` after the settings file is saved.
 pub fn settings_changed(before: &Settings, after: &Settings) {
-    if before.launcher != after.launcher || before.clipboard != after.clipboard {
+    if before.launcher != after.launcher || before.clipboard != after.clipboard || before.hotkeys != after.hotkeys {
         apply_shortcuts();
+    }
+    if before.expansion != after.expansion || before.snippets != after.snippets {
+        crate::expand::apply();
     }
     if before.glass != after.glass {
         crate::launcher::set_glass(after.glass);
@@ -388,6 +395,9 @@ fn start(mtm: MainThreadMarker, delegate: &AppDelegate) {
             crate::launcher::toggle();
         } else if e.id == CLIPBOARD_ID.load(Ordering::SeqCst) {
             crate::clipboard::toggle();
+        } else if let Some(def) = COMMANDS.with(|c| c.borrow().get(&e.id).copied()) {
+            let front = objc2_app_kit::NSWorkspace::sharedWorkspace().frontmostApplication();
+            crate::launcher::run_command(def, front.as_deref());
         }
     }));
     SHORTCUTS.with(|cell| {
@@ -403,7 +413,12 @@ fn start(mtm: MainThreadMarker, delegate: &AppDelegate) {
     } else {
         apply_shortcuts();
     }
+    livae_core::currency::load_from(&config::support_dir(), !test_mode());
+    crate::expand::apply();
     let retry = RcBlock::new(|_t: NonNull<NSTimer>| {
+        config::reload();
+        // Accessibility granted since the last tick: text expansion can start.
+        crate::expand::apply();
         claim_pending();
         crate::welcome::refresh();
         crate::settings::refresh();
@@ -453,6 +468,24 @@ fn start(mtm: MainThreadMarker, delegate: &AppDelegate) {
     if let Some(q) = args.iter().position(|a| a == "--query").and_then(|i| args.get(i + 1)) {
         let q = q.clone();
         crate::launcher::with(|l| l.set_query(&q));
+    }
+    // `--dump file`: the launcher's rows once its search settles, for checks over SSH.
+    if let Some(path) = args.iter().position(|a| a == "--dump").and_then(|i| args.get(i + 1)).cloned() {
+        let after = dispatch2::DispatchTime::NOW.time(1_500_000_000);
+        let _ = dispatch2::DispatchQueue::main().after(after, move || {
+            let _ = std::fs::write(&path, crate::launcher::dump());
+        });
+    }
+    // `--run id,id`: run launcher commands in turn, the way their hotkeys would (a test copy only logs them).
+    if let Some(ids) = args.iter().position(|a| a == "--run").and_then(|i| args.get(i + 1)) {
+        let pid = args.iter().position(|a| a == "--pid").and_then(|i| args.get(i + 1)).and_then(|p| p.parse().ok());
+        for id in ids.split(',') {
+            let Some(def) = livae_core::commands::all(livae_core::settings::Platform::Mac).find(|d| d.id == id) else { continue };
+            match def.command {
+                livae_core::commands::Command::Window(w) => crate::winmgr::run(w, def.id, pid),
+                _ => crate::launcher::run_command(def, None),
+            }
+        }
     }
 }
 

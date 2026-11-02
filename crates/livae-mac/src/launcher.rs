@@ -1,9 +1,10 @@
 //! The launcher, in the macOS 27 Spotlight shape: a glass search capsule and, below it, a separate glass card with
 //! the results, grouped in one `NSGlassEffectContainerView`.
 //!
-//! Empty query: the scopes (Applications, Files, Settings). Typing: a calculator answer when the query is maths,
-//! apps ranked by match and by how often you open them, then files from Spotlight's index (searched off the main
-//! thread). Mouse: hover selects, click opens. Keys: ↑↓, Enter, ⌘1-⌘9, ⌘, (Settings), Esc. A click outside closes.
+//! Empty query: the scopes (Applications, Files, Settings). Typing: a quicklink search ("gh livae") first, answers
+//! (maths, units, money, time zones), apps ranked by match and by how often you open them, commands (system and
+//! window), quicklinks and snippets, then files from Spotlight's index (searched off the main thread). Mouse: hover
+//! selects, click opens. Keys: ↑↓, Enter, ⌘1-⌘9, ⌘, (Settings), Esc. A click outside closes.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -15,11 +16,17 @@ use std::sync::Arc;
 use objc2::rc::Retained;
 use objc2::runtime::AnyClass;
 use objc2::{sel, MainThreadOnly};
+use livae_core::answers::Answer;
+use livae_core::commands::{Command, Def};
+use livae_core::quicklinks::{self, Hit};
+use livae_core::rows::{self, Extra};
+use livae_core::search::rank_words_scored;
+use livae_core::settings::Platform;
 use objc2_app_kit::{
     NSAutoresizingMaskOptions, NSBox, NSEvent, NSFont, NSGlassEffectContainerView, NSImage, NSImageView, NSPasteboard, NSPasteboardTypeString,
-    NSTextAlignment, NSTextField, NSView, NSWorkspace,
+    NSRunningApplication, NSTextAlignment, NSTextField, NSView, NSWorkspace,
 };
-use objc2_foundation::{ns_string, MainThreadMarker, NSPoint, NSRect, NSSize, NSString, NSURL};
+use objc2_foundation::{ns_string, MainThreadMarker, NSPoint, NSRange, NSRect, NSSize, NSString, NSURL};
 
 use crate::apps::{self, App, Usage};
 use crate::config;
@@ -55,9 +62,12 @@ enum Item {
     Clipboard,
     App(usize),
     File(PathBuf),
-    Calc(String),
-    /// "5 km to mi": the converted value and its unit label, e.g. ("3.107", "mi").
-    Convert(String, String),
+    /// Maths, units, money or the time somewhere; Enter copies it.
+    Answer(Answer),
+    Quick(Hit),
+    Command(&'static Def),
+    /// An index into the settings' snippets; Enter types it into the app in front.
+    Snippet(usize),
     Settings,
     /// Nothing local fits: search the web for the query.
     Web(String),
@@ -104,6 +114,10 @@ pub struct Launcher {
     recent: Arc<std::sync::Mutex<HashMap<String, u32>>>,
     top: f64,
     card_h: f64,
+    /// The app in front when the launcher opened: commands act on it.
+    front: Option<Retained<NSRunningApplication>>,
+    /// A command that asks for a second Enter, after the first.
+    armed: Option<usize>,
     _controller: Retained<Controller>,
     _list: Retained<List>,
 }
@@ -135,20 +149,24 @@ pub fn set_glass(darkness: f64) {
     });
 }
 
-fn evaluate(q: &str) -> Option<String> {
-    let q = q.trim();
-    if !q.chars().any(|c| c.is_ascii_digit()) || !q.chars().any(|c| "+-*/^%()".contains(c)) {
-        return None;
+/// Run a launcher command or a hotkey's command on `front` (the app that was in front).
+pub fn run_command(def: &Def, front: Option<&NSRunningApplication>) {
+    match def.command {
+        Command::System(s) => crate::system::run(s, def.id, front),
+        Command::Window(w) => crate::winmgr::run(w, def.id, front.map(|a| a.processIdentifier())),
     }
-    let value = evalexpr::eval(&q.replace('×', "*").replace('÷', "/").replace(',', ".")).ok()?;
-    match value {
-        evalexpr::Value::Int(n) => Some(n.to_string()),
-        evalexpr::Value::Float(f) if f.is_finite() => {
-            let s = format!("{f:.10}");
-            Some(s.trim_end_matches('0').trim_end_matches('.').to_string())
+}
+
+/// `--dump`: each row on screen as "n<TAB>title<TAB>detail".
+pub fn dump() -> String {
+    let mut out = String::new();
+    with(|l| {
+        for (n, item) in l.items.iter().enumerate().take(MAX_ROWS) {
+            let (title, detail) = l.texts(n, item);
+            out.push_str(&format!("{}\t{title}\t{detail}\n", n + 1));
         }
-        _ => None,
-    }
+    });
+    out
 }
 
 pub fn install(mtm: MainThreadMarker) {
@@ -223,6 +241,8 @@ pub fn install(mtm: MainThreadMarker) {
         recent: Arc::new(std::sync::Mutex::new(HashMap::new())),
         top: 0.0,
         card_h: 0.0,
+        front: None,
+        armed: None,
         _controller: controller,
         _list: list,
     };
@@ -255,6 +275,7 @@ thread_local! {
 
 impl Launcher {
     pub fn show(&mut self) {
+        self.front = NSWorkspace::sharedWorkspace().frontmostApplication();
         CMD.with(|c| c.set(NSEvent::modifierFlags_class().contains(objc2_app_kit::NSEventModifierFlags::Command)));
         crate::clipboard::with(|c| c.hide());
         self.rescan_apps();
@@ -418,6 +439,7 @@ impl Launcher {
             self.open_index(i);
         } else if i != self.selected {
             self.selected = i;
+            self.disarm();
             self.paint_selection();
         }
     }
@@ -485,12 +507,11 @@ impl Launcher {
                 Scope::Files => items.push(Item::Empty),
             }
         } else {
-            if let Some(v) = evaluate(q) {
-                items.push(Item::Calc(v));
-            }
-            if let Some(results) = livae_core::units::convert_query(q) {
-                items.extend(results.iter().take(3).map(|r| Item::Convert(livae_core::units::format_number(r.target_value), r.target_unit.name.to_string())));
-            }
+            let s = config::get();
+            let keyword = (self.scope == Scope::All).then(|| quicklinks::keyword_hit(q, &s.quicklinks)).flatten();
+            let keyword_index = keyword.as_ref().map(Hit::index);
+            items.extend(keyword.map(Item::Quick));
+            items.extend(livae_core::answers::answers(q, &s.currency()).into_iter().map(Item::Answer));
             if self.scope != Scope::Files {
                 let usage = &self.usage;
                 let apps = &self.apps;
@@ -498,7 +519,20 @@ impl Launcher {
                 let take = if self.scope == Scope::Apps { MAX_ITEMS } else { 6 };
                 let boost = |i: usize| usage.boost(&apps[i].name) + recent.get(&apps[i].name).copied().unwrap_or(0);
                 let named: Vec<(&str, &str)> = apps.iter().map(|a| (a.name.as_str(), a.keywords)).collect();
-                items.extend(livae_core::search::rank_words(q, &named, boost).into_iter().take(take).map(Item::App));
+                // Apps, commands, quicklinks and snippets in one order by how well each matches.
+                let mut ranked: Vec<(u32, Item)> = rank_words_scored(q, &named, boost).into_iter().take(take).map(|(sc, i)| (sc, Item::App(i))).collect();
+                if self.scope == Scope::All {
+                    let extras = rows::extras(q, Platform::Mac, &s.quicklinks, &s.snippets, keyword_index, |name| usage.boost(name));
+                    ranked.extend(extras.into_iter().map(|(sc, e)| {
+                        (sc, match e {
+                            Extra::Command(d) => Item::Command(d),
+                            Extra::Quick(h) => Item::Quick(h),
+                            Extra::Snippet(i) => Item::Snippet(i),
+                        })
+                    }));
+                }
+                ranked.sort_by_key(|(sc, _)| std::cmp::Reverse(*sc));
+                items.extend(ranked.into_iter().map(|(_, item)| item));
                 if self.scope == Scope::All {
                     let ql = q.to_lowercase();
                     if "settings".starts_with(&ql) || "preferences".starts_with(&ql) {
@@ -514,10 +548,10 @@ impl Launcher {
             if self.searching && self.files.is_empty() && self.scope == Scope::Files {
                 items.push(Item::Searching);
             }
-            if self.scope == Scope::All && !self.searching && !items.iter().any(|i| matches!(i, Item::Calc(_) | Item::Convert(..))) {
+            let maths = items.iter().any(|i| matches!(i, Item::Answer(_)));
+            if self.scope == Scope::All && !self.searching && !maths {
                 items.push(Item::Web(q.to_string()));
             }
-            let maths = items.iter().any(|i| matches!(i, Item::Calc(_) | Item::Convert(..)));
             if self.scope != Scope::Apps && !maths && !crate::access::folders_asked() {
                 items.push(Item::AllowFolders); // last, so Enter never starts system prompts by surprise
             }
@@ -527,6 +561,7 @@ impl Launcher {
         }
         items.truncate(MAX_ITEMS);
         self.first = 0;
+        self.armed = None;
         self.items = items;
         self.selected = self.selected.min(self.items.len().saturating_sub(1));
         self.layout();
@@ -637,6 +672,7 @@ impl Launcher {
         }
         let n = self.items.len() as isize;
         self.selected = ((self.selected as isize + by).rem_euclid(n)) as usize;
+        self.disarm();
         if self.selected < self.first {
             self.first = self.selected;
             self.layout();
@@ -692,7 +728,8 @@ impl Launcher {
                 NSWorkspace::sharedWorkspace().openURL(&NSURL::fileURLWithPath(&NSString::from_str(&p.to_string_lossy())));
                 self.hide();
             }
-            Item::Convert(v, _) | Item::Calc(v) => {
+            Item::Answer(a) => {
+                let v = a.copy;
                 let pb = NSPasteboard::generalPasteboard();
                 pb.clearContents();
                 pb.setString_forType(&NSString::from_str(&v), unsafe { NSPasteboardTypeString });
@@ -700,18 +737,91 @@ impl Launcher {
                 self.hide();
                 crate::hud::show(&format!("Copied {v}"), NSPoint::new(f.origin.x + WIDTH / 2.0, f.origin.y + f.size.height - FIELD_H / 2.0));
             }
-            Item::Web(q) => {
-                let enc: String = q.bytes().map(|b| if b.is_ascii_alphanumeric() { (b as char).to_string() } else { format!("%{b:02X}") }).collect();
-                if let Some(url) = NSURL::URLWithString(&NSString::from_str(&format!("https://www.google.com/search?q={enc}"))) {
-                    NSWorkspace::sharedWorkspace().openURL(&url);
+            Item::Quick(Hit::Open { url, .. }) => self.open_url(&url),
+            Item::Quick(Hit::Fill { text, .. }) => {
+                self.set_query(&text);
+                if let Some(editor) = self.field.currentEditor() {
+                    editor.setSelectedRange(NSRange::new(text.encode_utf16().count(), 0));
                 }
-                self.hide();
             }
+            Item::Command(def) => {
+                if def.command.confirm() && self.armed != Some(i) {
+                    self.armed = Some(i);
+                    self.layout();
+                    return;
+                }
+                let front = self.front.take();
+                self.usage.bump(def.name);
+                self.hide();
+                run_command(def, front.as_deref());
+            }
+            Item::Snippet(n) => {
+                let Some(snippet) = config::get().snippets.get(n).cloned() else { return };
+                self.hide();
+                if crate::app::test_mode() {
+                    crate::system::log_test(&format!("snippet {}", snippet.trigger));
+                } else {
+                    crate::expand::type_snippet(&snippet.text);
+                }
+            }
+            Item::Web(q) => self.open_url(&format!("https://www.google.com/search?q={}", quicklinks::encode(&q))),
             Item::Settings => {
                 self.hide();
                 crate::settings::show();
             }
             Item::Searching | Item::Empty => {}
+        }
+    }
+
+    fn open_url(&mut self, url: &str) {
+        if let Some(url) = NSURL::URLWithString(&NSString::from_str(url)) {
+            NSWorkspace::sharedWorkspace().openURL(&url);
+        }
+        self.hide();
+    }
+
+    fn disarm(&mut self) {
+        if self.armed.take().is_some() {
+            self.layout();
+        }
+    }
+
+    /// A row's words: (title, detail). `i` is its index in the list.
+    fn texts(&self, i: usize, item: &Item) -> (String, String) {
+        match item {
+            Item::Scope { title, .. } => (title.to_string(), String::new()),
+            Item::Clipboard => ("Clipboard".to_string(), String::new()),
+            Item::App(a) => (self.apps[*a].name.clone(), self.apps[*a].detail.to_string()),
+            Item::File(p) => (
+                p.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default(),
+                p.parent().map(|d| crate::ui::tilde(&d.to_string_lossy())).unwrap_or_default(),
+            ),
+            Item::Answer(a) => (a.title.clone(), a.detail.clone()),
+            Item::Quick(Hit::Open { title, .. } | Hit::Fill { title, .. }) => (title.clone(), "Quicklink".to_string()),
+            Item::Command(d) => (d.name.to_string(), if self.armed == Some(i) { "Press Enter again".to_string() } else { d.command.detail().to_string() }),
+            Item::Snippet(n) => {
+                let s = config::get();
+                let Some(x) = s.snippets.get(*n) else { return (String::new(), String::new()) };
+                // As it would be typed, with the copied text shown as its placeholder.
+                let (text, _) = livae_core::snippets::render(&x.text, livae_core::journal::now(), || Some("{clipboard}".into()));
+                let line = text.lines().next().unwrap_or_default();
+                let short: String = line.chars().take(60).collect();
+                (if short.len() < line.len() { format!("{short}…") } else { short }, x.trigger.clone())
+            }
+            Item::Web(_) => ("Search the web".to_string(), String::new()),
+            Item::Settings => ("Settings".to_string(), String::new()),
+            Item::AllowFolders => ("Include Desktop, Documents and Downloads".to_string(), String::new()),
+            Item::Searching => ("Searching files…".to_string(), String::new()),
+            Item::Empty => (
+                if self.field.stringValue().length() == 0 {
+                    "Type a file name".to_string()
+                } else if self.scope == Scope::Files {
+                    format!("No file names match \u{201c}{}\u{201d}", self.field.stringValue())
+                } else {
+                    "No matches".to_string()
+                },
+                if self.scope == Scope::All { String::new() } else { "⌫ back to everything".to_string() },
+            ),
         }
     }
 
@@ -773,37 +883,22 @@ impl Launcher {
                 continue;
             }
             let y = card_h - INSET - (slot as f64 + 1.0) * ROW_H;
-            let item = self.items[self.first + slot].clone();
-            let (title, detail, image, template): (String, String, Option<Retained<NSImage>>, bool) = match &item {
-                Item::Scope { title, .. } => (title.to_string(), String::new(), None, true),
-                Item::Clipboard => ("Clipboard".to_string(), String::new(), None, true),
+            let index = self.first + slot;
+            let item = self.items[index].clone();
+            let (title, detail) = self.texts(index, &item);
+            let symbol = match &item {
+                Item::Quick(_) => Some("link"),
+                Item::Command(d) => Some(if matches!(d.command, Command::Window(_)) { "macwindow" } else { "power" }),
+                Item::Snippet(_) => Some("text.quote"),
+                _ => None,
+            };
+            let (image, template): (Option<Retained<NSImage>>, bool) = match &item {
                 Item::App(i) => {
                     let p = self.apps[*i].path.to_string_lossy().to_string();
-                    (self.apps[*i].name.clone(), self.apps[*i].detail.to_string(), Some(self.icon_for(&p)), false)
+                    (Some(self.icon_for(&p)), false)
                 }
-                Item::File(p) => {
-                    let ps = p.to_string_lossy().to_string();
-                    let parent = p.parent().map(|d| crate::ui::tilde(&d.to_string_lossy())).unwrap_or_default();
-                    (p.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default(), parent, Some(self.icon_for(&ps)), false)
-                }
-                Item::Calc(v) => (v.clone(), String::new(), None, true),
-                Item::Convert(v, unit) => (format!("{v} {unit}"), String::new(), None, true),
-                Item::Web(_) => ("Search the web".to_string(), String::new(), None, true),
-                Item::Settings => ("Settings".to_string(), String::new(), None, true),
-                Item::AllowFolders => ("Include Desktop, Documents and Downloads".to_string(), String::new(), None, true),
-                Item::Searching => ("Searching files…".to_string(), String::new(), None, true),
-                Item::Empty => (
-                    if self.field.stringValue().length() == 0 {
-                        "Type a file name".to_string()
-                    } else if self.scope == Scope::Files {
-                        format!("No file names match \u{201c}{}\u{201d}", self.field.stringValue())
-                    } else {
-                        "No matches".to_string()
-                    },
-                    if self.scope == Scope::All { String::new() } else { "⌫ back to everything".to_string() },
-                    None,
-                    true,
-                ),
+                Item::File(p) => (Some(self.icon_for(&p.to_string_lossy())), false),
+                _ => (symbol.and_then(ui::symbol), true),
             };
             let quiet = matches!(item, Item::Empty | Item::Searching);
             let row = &self.rows[slot];
@@ -814,7 +909,7 @@ impl Launcher {
             row.icon.setImage(image.as_deref());
             row.icon.setContentTintColor(if template { Some(&*tint) } else { None });
             row.title.setTextColor(Some(&ui::rgb(if quiet { TERTIARY } else { TEXT })));
-            let answer = matches!(item, Item::Calc(_) | Item::Convert(..));
+            let answer = matches!(item, Item::Answer(_));
             let font = if answer {
                 crate::font::sans(24.0, unsafe { objc2_app_kit::NSFontWeightSemibold })
             } else {

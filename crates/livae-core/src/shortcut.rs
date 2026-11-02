@@ -21,6 +21,11 @@ pub enum Key {
     /// Upper case A-Z.
     Letter(char),
     Digit(u8),
+    Left,
+    Right,
+    Up,
+    Down,
+    Return,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,6 +51,11 @@ pub fn parse(text: &str, hyper: Mods) -> Option<Shortcut> {
             "opt" | "option" | "alt" => m.alt = true,
             "shift" => m.shift = true,
             "space" => key = Some(Key::Space),
+            "left" => key = Some(Key::Left),
+            "right" => key = Some(Key::Right),
+            "up" => key = Some(Key::Up),
+            "down" => key = Some(Key::Down),
+            "return" | "enter" => key = Some(Key::Return),
             k if k.len() == 1 && k.chars().all(|c| c.is_ascii_alphabetic()) => key = k.chars().next().map(|c| Key::Letter(c.to_ascii_uppercase())),
             k if k.len() == 1 && k.chars().all(|c| c.is_ascii_digit()) => key = k.parse().ok().map(Key::Digit),
             _ => return None,
@@ -70,5 +80,7 @@ mod tests {
         assert!(parse("V", HYPER_WINDOWS).is_none());
         assert!(parse("Hyper", HYPER_WINDOWS).is_none());
         assert!(parse("Hyper+F13", HYPER_WINDOWS).is_none());
+        assert_eq!(parse("Ctrl+Opt+Left", HYPER_MAC).map(|s| s.key), Some(Key::Left));
+        assert!(parse("Left", HYPER_MAC).is_none());
     }
 }

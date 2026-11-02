@@ -68,6 +68,16 @@ pub const HEADER: &str = "# Livae settings. Save the file and Livae applies it w
 # glass: 0 clear to 1 dark. paste: paste the chosen clipboard item into the app in front.\n\
 # file_search: extra folders to search besides Desktop, Documents and Downloads (\"~\" is your user folder).\n\
 # ignore_apps: programs whose copies are never recorded (the name without .exe).\n\
+# currency: default currency code, e.g. \"EUR\"; empty uses your region.\n\
+# expansion: turn typed triggers on or off.\n\
+# [[snippets]]: trigger and text; {date} {time} {clipboard} {cursor}.\n\
+# [[quicklinks]]: name, keyword, url; {query} in the URL becomes your search words.\n\
+# [hotkeys]: command id = shortcut, e.g. left-half = \"Hyper+Left\".\n\
+# System ids: lock-screen, sleep, displays-off, restart, shut-down, log-out.\n\
+# More system ids: empty-trash, dark-mode, quit-app, force-quit-app.\n\
+# Window ids: left-half, right-half, top-half, bottom-half, maximize, almost-maximize.\n\
+# More window ids: center, restore, next-display, left-third, center-third, right-third.\n\
+# More window ids: left-two-thirds, right-two-thirds, top-left, top-right, bottom-left, bottom-right.\n\
 # [breaks]: break reminders, off until enabled (minutes, seconds; strict breaks cannot be skipped).\n\
 # [journal]: the evening note; at = \"HH:MM\", file = the Markdown file it is written to (\"~\" is your user folder).\n\n";
 
@@ -415,5 +425,13 @@ mod tests {
         assert!(parse("[gate]\nsites = []\n").unwrap().1.sites.is_empty());
         let defaults = Gate::default();
         assert_eq!(parse(&defaults.toml()).unwrap().1, defaults);
+    }
+}
+
+/// A test copy records actions instead of running them.
+pub fn log_action(text: &str) {
+    use std::io::Write;
+    if test_mode() && let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(data_dir().join("actions.log")) {
+        let _ = writeln!(file, "{text}");
     }
 }

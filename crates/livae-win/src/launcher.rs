@@ -1,9 +1,9 @@
 //! The launcher, in the Mac v0.2 shape: a glass search capsule and, 10 px below, a glass card with the results.
 //!
 //! Empty query: the scopes (Applications, Files, Clipboard, Settings), after the most used apps when that setting
-//! is on. Typing: a calculator answer or unit conversion when the query is maths, apps (Start menu shortcuts and
+//! is on. Typing: answers for maths, units, money and time zones, apps (Start menu shortcuts and
 //! Store apps) ranked by match and use, files from a name index of the user's folders (built off the UI thread,
-//! refreshed every 10 minutes), and "Search the web" last. Keys: Up/Down, Enter opens, Ctrl+Enter shows the file in
+//! refreshed every 10 minutes), quicklinks, commands, snippets, and "Search the web" last. Keys: Up/Down, Enter opens, Ctrl+Enter shows the file in
 //! Explorer, Ctrl+1..9 opens a row (the numbers show while Ctrl is held), Esc closes. Mouse: hover selects, a
 //! click opens. It hides when it loses the focus.
 
@@ -16,8 +16,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use livae_core::commands;
 use livae_core::field::Field;
-use livae_core::settings::Settings;
+use livae_core::quicklinks::{self, Hit};
+use livae_core::rows::{self, Extra};
+use livae_core::search::rank_words_scored;
+use livae_core::settings::{Platform, Settings};
 use livae_core::usage::Usage;
 use windows::Win32::Foundation::{LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::Graphics::DirectWrite::{DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_SEMI_BOLD};
@@ -79,9 +83,10 @@ enum Item {
     App(usize),
     /// A file or folder (true for a folder).
     File(PathBuf, bool),
-    Calc(String),
-    /// "5 km to mi": the converted value and its unit.
-    Convert(String, String),
+    Answer(livae_core::answers::Answer),
+    Quicklink(Hit),
+    Command(&'static commands::Def),
+    Snippet(livae_core::snippets::Snippet),
     Settings,
     /// Nothing local fits: search the web for the query.
     Web(String),
@@ -114,6 +119,7 @@ pub struct Launcher {
     index: Option<Arc<Index>>,
     items: Vec<Item>,
     selected: usize,
+    armed: Option<usize>,
     first: usize,
     /// Ctrl is held: rows show their Ctrl+1..9 numbers.
     ctrl: bool,
@@ -146,6 +152,8 @@ fn usage_file() -> PathBuf {
 }
 
 pub fn install() {
+    // Rates come from disk; a money question fetches fresh ones (never in a test copy).
+    livae_core::currency::load_from(&config::data_dir(), !config::test_mode());
     let mut apps = scan_start_menu();
     add_system(&mut apps);
     let names = apps.iter().map(|a| a.name.clone()).collect();
@@ -159,6 +167,7 @@ pub fn install() {
         index: None,
         items: Vec::new(),
         selected: 0,
+        armed: None,
         first: 0,
         ctrl: false,
         caret: true,
@@ -469,6 +478,7 @@ impl Launcher {
     }
 
     fn rebuild(&mut self) {
+        self.armed = None;
         let q = self.field.text().trim().to_string();
         let s = config::get();
         let mut items = Vec::new();
@@ -496,16 +506,28 @@ impl Launcher {
                 Scope::Files => items.push(Item::Empty),
             }
         } else {
-            if let Some(v) = livae_core::calc::evaluate(&q) {
-                items.push(Item::Calc(v));
-            }
-            if let Some(results) = livae_core::units::convert_query(&q) {
-                items.extend(results.iter().take(3).map(|r| Item::Convert(livae_core::units::format_number(r.target_value), r.target_unit.name.to_string())));
-            }
+            let keyword = if self.scope == Scope::All { quicklinks::keyword_hit(&q, &s.quicklinks) } else { None };
+            let keyword_index = keyword.as_ref().map(Hit::index);
+            items.extend(keyword.map(Item::Quicklink));
+            let currency = if s.currency.is_empty() { region_currency() } else { s.currency.clone() };
+            items.extend(livae_core::answers::answers(&q, &currency).into_iter().map(Item::Answer));
             if self.scope != Scope::Files {
                 let take = if self.scope == Scope::Apps { MAX_ITEMS } else { 6 };
                 let named: Vec<(&str, &str)> = self.apps.iter().map(|a| (a.name.as_str(), a.keywords)).collect();
-                items.extend(livae_core::search::rank_words(&q, &named, used).into_iter().take(take).map(Item::App));
+                // Apps, commands, quicklinks and snippets in one order by how well each matches.
+                let mut ranked: Vec<(u32, Item)> = rank_words_scored(&q, &named, used).into_iter().take(take).map(|(sc, i)| (sc, Item::App(i))).collect();
+                if self.scope == Scope::All {
+                    let extras = rows::extras(&q, Platform::Windows, &s.quicklinks, &s.snippets, keyword_index, |name| usage.boost(name));
+                    ranked.extend(extras.into_iter().map(|(sc, e)| {
+                        (sc, match e {
+                            Extra::Command(d) => Item::Command(d),
+                            Extra::Quick(h) => Item::Quicklink(h),
+                            Extra::Snippet(i) => Item::Snippet(s.snippets[i].clone()),
+                        })
+                    }));
+                }
+                ranked.sort_by_key(|(sc, _)| std::cmp::Reverse(*sc));
+                items.extend(ranked.into_iter().map(|(_, item)| item));
                 if self.scope == Scope::All {
                     let ql = q.to_lowercase();
                     if "settings".starts_with(&ql) || "preferences".starts_with(&ql) {
@@ -532,7 +554,7 @@ impl Launcher {
                     None => {}
                 }
             }
-            let maths = items.iter().any(|i| matches!(i, Item::Calc(_) | Item::Convert(..)));
+            let maths = items.iter().any(|i| matches!(i, Item::Answer(_)));
             if self.scope == Scope::All && !maths {
                 items.push(Item::Web(q.clone()));
             }
@@ -558,6 +580,7 @@ impl Launcher {
     }
 
     fn move_selection(&mut self, by: isize) {
+        self.armed = None;
         if self.items.is_empty() {
             return;
         }
@@ -572,6 +595,7 @@ impl Launcher {
     }
 
     fn scroll(&mut self, rows: isize) {
+        self.armed = None;
         let max_first = self.items.len().saturating_sub(MAX_ROWS) as isize;
         self.first = (self.first as isize + rows).clamp(0, max_first) as usize;
         self.selected = self.selected.clamp(self.first, (self.first + MAX_ROWS - 1).min(self.items.len().saturating_sub(1)));
@@ -586,6 +610,7 @@ impl Launcher {
 
     fn open(&mut self, i: usize) {
         let Some(item) = self.items.get(i).cloned() else { return };
+        if self.selected != i { self.armed = None; self.selected = i; }
         match item {
             Item::Scope(_, scope) => self.set_scope(scope),
             Item::Clipboard => {
@@ -610,15 +635,41 @@ impl Launcher {
                 shell::open(&p.to_string_lossy());
                 self.hide(false);
             }
-            Item::Calc(v) | Item::Convert(v, _) => {
+            Item::Answer(answer) => {
+                let v = answer.copy;
                 crate::clipboard::put_text(&v);
                 let at = POINT { x: self.panel.x + self.panel.px(WIDTH / 2.0), y: self.panel.top + self.panel.px(FIELD_H / 2.0) };
                 self.hide(true);
                 glass::toast(&format!("Copied {v}"), at);
             }
+            Item::Quicklink(Hit::Open { url, .. }) => {
+                shell::open(&url);
+                self.hide(false);
+            }
+            Item::Quicklink(Hit::Fill { text, .. }) => {
+                self.field.set(&text);
+                self.query_changed();
+            }
+            Item::Command(definition) => {
+                if definition.command.confirm() && self.armed != Some(i) {
+                    self.armed = Some(i);
+                    self.paint_card();
+                    return;
+                }
+                let front = self.panel.prev;
+                self.armed = None;
+                self.usage.bump(definition.name);
+                self.save_usage();
+                self.hide(true);
+                app::run_command(definition.command, front);
+            }
+            Item::Snippet(snippet) => {
+                let front = self.panel.prev;
+                self.hide(true);
+                crate::expand::insert(snippet, front);
+            }
             Item::Web(q) => {
-                let enc: String = q.bytes().map(|b| if b.is_ascii_alphanumeric() { (b as char).to_string() } else { format!("%{b:02X}") }).collect();
-                shell::open(&format!("https://www.google.com/search?q={enc}"));
+                shell::open(&format!("https://www.google.com/search?q={}", quicklinks::encode(&q)));
                 self.hide(false);
             }
             Item::Settings => {
@@ -658,8 +709,19 @@ impl Launcher {
                 let name = p.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_else(|| p.to_string_lossy().to_string());
                 (name, p.parent().map(home_text).unwrap_or_default())
             }
-            Item::Calc(v) => (v.clone(), String::new()),
-            Item::Convert(v, unit) => (format!("{v} {unit}"), String::new()),
+            Item::Answer(answer) => (answer.title.clone(), answer.detail.clone()),
+            Item::Quicklink(Hit::Open { title, .. } | Hit::Fill { title, .. }) => (title.clone(), "Quicklink".into()),
+            Item::Command(definition) => (definition.name.into(), if self.armed == Some(self.selected)
+                && matches!(self.items.get(self.selected), Some(Item::Command(d)) if d.command == definition.command) {
+                    "Press Enter again".into()
+                } else { definition.command.detail().into() }),
+            Item::Snippet(snippet) => {
+                // As it would be typed, with the copied text shown as its placeholder.
+                let (text, _) = livae_core::snippets::render(&snippet.text, livae_core::journal::now(), || Some("{clipboard}".into()));
+                let line = text.lines().next().unwrap_or_default();
+                let short: String = line.chars().take(60).collect();
+                (if short.len() < line.len() { format!("{short}…") } else { short }, snippet.trigger.clone())
+            }
             Item::Settings => ("Livae Settings".into(), String::new()),
             Item::Web(_) => ("Search the web".into(), String::new()),
             Item::Indexing => ("Indexing files…".into(), String::new()),
@@ -747,7 +809,7 @@ impl Launcher {
                 title,
                 detail,
                 icon,
-                answer: matches!(item, Item::Calc(_) | Item::Convert(..)),
+                answer: matches!(item, Item::Answer(_)),
                 quiet: !selectable,
                 file: matches!(item, Item::File(..)),
                 on: i == self.selected && selectable,
@@ -770,7 +832,12 @@ impl Launcher {
                 }
                 let color = if r.quiet { TERTIARY } else { TEXT };
                 if r.answer {
+                    let tw = g.width(&r.title, &answer).min(right - TEXT_X);
                     c.text(&r.title, &answer, TEXT_X, r.y, right - TEXT_X, ROW_H, color);
+                    if !r.detail.is_empty() {
+                        let dx = TEXT_X + tw + 12.0;
+                        c.text(&r.detail, &small, dx, r.y, (right - dx).max(1.0), ROW_H, SECONDARY);
+                    }
                 } else if r.file {
                     let title = g.fit(&r.title, &body, 420.0, Trim::Middle);
                     c.text(&title, &body, TEXT_X, r.y, 424.0, ROW_H, color);
@@ -887,6 +954,8 @@ impl Launcher {
                 self.hide(true);
                 Some(LRESULT(0))
             }
+            // Holding Enter is one confirmation, even when Windows repeats the key.
+            WM_KEYDOWN if wparam.0 as u16 == VK_RETURN.0 && lparam.0 & (1 << 30) != 0 => Some(LRESULT(0)),
             WM_KEYDOWN => self.key(wparam.0 as u16).then_some(LRESULT(0)),
             WM_KEYUP if wparam.0 as u16 == VK_CONTROL.0 => {
                 if self.ctrl {
@@ -918,6 +987,7 @@ impl Launcher {
                     self.mouse = at;
                     if let Some(i) = self.slot_at(lparam)
                         && i != self.selected && !matches!(self.items[i], Item::Empty | Item::Indexing) {
+                            self.armed = None;
                             self.selected = i;
                             self.paint_card();
                         }
@@ -926,7 +996,6 @@ impl Launcher {
             }
             WM_LBUTTONUP if card => {
                 if let Some(i) = self.slot_at(lparam) {
-                    self.selected = i;
                     self.open(i);
                 }
                 Some(LRESULT(0))
@@ -967,4 +1036,14 @@ pub fn dump() -> String {
         s
     })
     .unwrap_or_default()
+}
+
+/// ISO currency from the user's region, when the settings leave it empty.
+fn region_currency() -> String {
+    use windows::Win32::Globalization::{GetLocaleInfoEx, LOCALE_SINTLSYMBOL};
+    // LOCALE_NAME_USER_DEFAULT is the null locale name in the Windows SDK.
+    let mut text = [0u16; 16];
+    let n = unsafe { GetLocaleInfoEx(windows::core::PCWSTR::null(), LOCALE_SINTLSYMBOL, Some(&mut text)) };
+    let code = if n > 1 { String::from_utf16_lossy(&text[..n as usize - 1]).trim().to_string() } else { String::new() };
+    if code.is_empty() { "EUR".into() } else { code }
 }

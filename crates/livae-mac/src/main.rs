@@ -13,6 +13,8 @@ mod clipboard;
 #[cfg(target_os = "macos")]
 mod config;
 #[cfg(target_os = "macos")]
+mod expand;
+#[cfg(target_os = "macos")]
 mod gate;
 #[cfg(target_os = "macos")]
 mod font;
@@ -29,9 +31,13 @@ mod panel;
 #[cfg(target_os = "macos")]
 mod settings;
 #[cfg(target_os = "macos")]
+mod system;
+#[cfg(target_os = "macos")]
 mod ui;
 #[cfg(target_os = "macos")]
 mod welcome;
+#[cfg(target_os = "macos")]
+mod winmgr;
 #[cfg(target_os = "macos")] mod year;
 
 #[cfg(target_os = "macos")]
