@@ -17,7 +17,7 @@ use std::time::Instant;
 use windows::core::{w, Interface, PCWSTR};
 use windows::Win32::Foundation::{D2DERR_RECREATE_TARGET, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_GRADIENT_STOP, D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_U,
+    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COMPOSITE_MODE_SOURCE_OVER, D2D1_COLOR_F, D2D1_GRADIENT_STOP, D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_U,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, ID2D1Bitmap, ID2D1Factory, ID2D1HwndRenderTarget, ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
@@ -25,7 +25,8 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT, D2D1_EXTEND_MODE_CLAMP, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_GAMMA_2_2,
     D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_PRESENT_OPTIONS_NONE, D2D1_RENDER_TARGET_PROPERTIES,
     D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES, D2D1_DASH_STYLE_CUSTOM, D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_TYPE_SOFTWARE,
-    ID2D1StrokeStyle, D2D1_LAYER_PARAMETERS,
+    ID2D1StrokeStyle, D2D1_LAYER_PARAMETERS, ID2D1DeviceContext, ID2D1Effect, ID2D1CommandList, ID2D1Image,
+    CLSID_D2D1GaussianBlur, D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION, D2D1_PROPERTY_TYPE_FLOAT, D2D1_INTERPOLATION_MODE_LINEAR,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteFactory5, IDWriteFontCollection, IDWriteFontCollection1, IDWriteTextFormat, IDWriteTextLayout,
@@ -53,7 +54,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows_numerics::{Matrix3x2, Vector2};
 
 use crate::shell::{self, Pixels};
-use crate::motion::{self, Frame, Pose, Progress};
+use crate::motion::{self, Family, Frame, Progress};
 use livae_core::{blur, tokens};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -290,11 +291,73 @@ impl Gfx {
     }
 }
 
+/// Record in pixels so the blur radius scales with the window's DPI.
+struct FocusBlur {
+    context: ID2D1DeviceContext,
+    effect: ID2D1Effect,
+}
+
+struct Recording {
+    commands: ID2D1CommandList,
+    target: ID2D1Image,
+}
+
+fn push_opacity(t: &ID2D1HwndRenderTarget, w: f32, h: f32, opacity: f32) {
+    if opacity < 1.0 {
+        let params = D2D1_LAYER_PARAMETERS {
+            contentBounds: rect(0.0, 0.0, w, h), maskTransform: Matrix3x2::identity(), opacity, ..Default::default()
+        };
+        unsafe { t.PushLayer(&params, None); }
+    }
+}
+
+impl FocusBlur {
+    fn new(t: &ID2D1HwndRenderTarget) -> Option<Self> {
+        let context: ID2D1DeviceContext = t.cast().ok()?;
+        let effect = unsafe { context.CreateEffect(&CLSID_D2D1GaussianBlur).ok()? };
+        Some(Self { context, effect })
+    }
+
+    fn begin(&self, scale: f32, radius: f32) -> Option<Recording> {
+        unsafe {
+            let commands = self.context.CreateCommandList().ok()?;
+            let target = self.context.GetTarget().ok()?;
+            self.effect.SetValue(D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION.0 as u32, D2D1_PROPERTY_TYPE_FLOAT, &(radius * scale).to_ne_bytes()).ok()?;
+            self.context.SetTarget(&commands);
+            self.context.SetDpi(96.0, 96.0);
+            self.context.SetTransform(&Matrix3x2::scale(scale, scale));
+            Some(Recording { commands, target })
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)] // the frame's target, DPI, transform, opacity and bounds
+    fn finish(&self, recording: Recording, t: &ID2D1HwndRenderTarget, scale: f32, matrix: Matrix3x2, opacity: f32, size: (f32, f32)) {
+        unsafe {
+            self.context.SetTarget(&recording.target);
+            self.context.SetDpi(96.0 * scale, 96.0 * scale);
+            t.SetTransform(&matrix);
+            if recording.commands.Close().is_ok() {
+                self.effect.SetInput(0, &recording.commands, true);
+                push_opacity(t, size.0, size.1, opacity);
+                let pixels = Matrix3x2 { M11: matrix.M11 / scale, M22: matrix.M22 / scale, ..matrix };
+                t.SetTransform(&pixels);
+                if let Ok(output) = self.effect.GetOutput() {
+                    self.context.DrawImage(&output, None, None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
+                }
+                if opacity < 1.0 {
+                    t.PopLayer();
+                }
+                self.effect.SetInput(0, None, true);
+            }
+        }
+    }
+}
+
 /// One glass window and its Direct2D target; bitmaps (icons, thumbnails) belong to the target.
 pub struct Surface {
     pub hwnd: HWND,
-    motion: Rc<Cell<Progress>>,
-    motion_origin: (f32, f32),
+    motion: Cell<Progress>,
+    blur: Option<FocusBlur>,
     motion_done: Cell<bool>,
     /// Hidden from the screen by DWM until its first frame is drawn, so Windows never shows the empty window
     /// (grey fill and a white frame) that appears for a moment between showing and painting.
@@ -330,7 +393,7 @@ impl Surface {
             let _ = DwmExtendFrameIntoClientArea(hwnd, &MARGINS { cxLeftWidth: -1, cxRightWidth: -1, cyTopHeight: -1, cyBottomHeight: -1 });
             // DWM applies the attributes on the next frame change.
             let _ = SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
-            Self { hwnd, motion: Rc::new(Cell::new(Progress::default())), motion_origin: (0.0, 0.0), motion_done: Cell::new(true), cloaked: false, target: None, bitmaps: HashMap::new(), backdrop: None, software: false }
+            Self { hwnd, motion: Cell::new(Progress::default()), blur: None, motion_done: Cell::new(true), cloaked: false, target: None, bitmaps: HashMap::new(), backdrop: None, software: false }
         }
     }
 
@@ -372,12 +435,12 @@ impl Surface {
     }
 
     pub fn frame(&self) -> Frame {
-        self.motion.get().frame(Instant::now()).local(self.motion_origin)
+        self.motion.get().frame(Instant::now())
     }
 
-    pub fn enter(&mut self, pose: Pose, anchor: (f32, f32), ms: u64) {
+    pub fn enter(&mut self, family: Family, anchor: (f32, f32)) {
         let mut progress = self.motion.get();
-        progress.enter(Frame::pose(pose, anchor, motion::animations()), ms, self.visible(), Instant::now());
+        progress.enter(family, anchor, motion::animations(), self.visible(), Instant::now());
         self.motion.set(progress);
         self.cloak_until_drawn();
         self.animate();
@@ -388,7 +451,7 @@ impl Surface {
             return;
         }
         let mut progress = self.motion.get();
-        progress.exit(Frame::pose(Pose::Shrink, anchor, motion::animations()), Instant::now());
+        progress.exit(anchor, Instant::now());
         self.motion.set(progress);
         self.animate();
     }
@@ -396,6 +459,12 @@ impl Surface {
     fn animate(&self) {
         self.motion_done.set(false);
         unsafe { SetTimer(Some(self.hwnd), motion::FRAME_TIMER, 16, None); }
+    }
+
+    pub fn rows(&self, rows: usize) {
+        let mut progress = self.motion.get();
+        progress.set_rows(rows);
+        self.motion.set(progress);
     }
 
     pub fn band_timer(&self, active: bool) {
@@ -459,6 +528,7 @@ impl Surface {
                 let hprops = D2D1_HWND_RENDER_TARGET_PROPERTIES { hwnd: self.hwnd, pixelSize: size, presentOptions: D2D1_PRESENT_OPTIONS_NONE };
                 self.target = gfx().d2d.CreateHwndRenderTarget(&props, &hprops).ok();
                 self.bitmaps.clear();
+                self.blur = self.target.as_ref().and_then(FocusBlur::new);
             }
             let Some(t) = self.target.clone() else { return };
             let now = t.GetPixelSize();
@@ -472,29 +542,30 @@ impl Surface {
             t.Clear(Some(&color(Rgba(0.0, 0.0, 0.0, 0.0))));
             let mut progress = self.motion.get();
             let now = Instant::now();
-            let frame = progress.draw_frame(now).local(self.motion_origin);
+            let frame = progress.draw_frame(now);
             self.motion.set(progress);
-            let layer = frame.opacity < 1.0;
-            t.SetTransform(&Matrix3x2 { M11: frame.scale, M22: frame.scale, M31: frame.x, M32: frame.y, ..Matrix3x2::identity() });
-            if layer {
-                let params = D2D1_LAYER_PARAMETERS {
-                    contentBounds: rect(0.0, 0.0, size.width as f32 / scale, size.height as f32 / scale),
-                    maskTransform: Matrix3x2::identity(),
-                    opacity: frame.opacity,
-                    ..Default::default()
-                };
-                t.PushLayer(&params, None);
+            let matrix = Matrix3x2 { M11: frame.sx, M22: frame.sy, M31: frame.x, M32: frame.y, ..Matrix3x2::identity() };
+            let recording = if frame.blur > 0.0 { self.blur.as_ref().and_then(|b| b.begin(scale, frame.blur)) } else { None };
+            if recording.is_none() {
+                t.SetTransform(&matrix);
+                push_opacity(&t, size.width as f32 / scale, size.height as f32 / scale, frame.opacity);
             }
             let own = self.backdrop.clone();
-            let mut canvas = Canvas { t: &t, w: size.width as f32 / scale, h: size.height as f32 / scale, scale, hwnd: self.hwnd, bitmaps: &mut self.bitmaps, own };
+            let mut canvas = Canvas {
+                t: &t, w: size.width as f32 / scale, h: size.height as f32 / scale, scale,
+                hwnd: self.hwnd, bitmaps: &mut self.bitmaps, own, progress, now,
+            };
             f(&mut canvas);
-            if layer {
+            if let Some(recording) = recording {
+                self.blur.as_ref().unwrap().finish(recording, &t, scale, matrix, frame.opacity, (canvas.w, canvas.h));
+            } else if frame.opacity < 1.0 {
                 t.PopLayer();
             }
             t.SetTransform(&Matrix3x2::identity());
             if let Err(e) = t.EndDraw(None, None) && e.code() == D2DERR_RECREATE_TARGET {
                 // Device lost (driver update, GPU reset): rebuilt on the next paint.
                 self.target = None;
+                self.blur = None;
                 self.bitmaps.clear();
                 let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(self.hwnd), None, false);
                 return;
@@ -524,10 +595,34 @@ pub struct Canvas<'a> {
     hwnd: HWND,
     bitmaps: &'a mut HashMap<String, Option<ID2D1Bitmap>>,
     own: Option<Rc<Backdrop>>,
+    progress: Progress,
+    now: Instant,
 }
 
 #[allow(clippy::too_many_arguments)] // drawing calls take a box, a radius and a colour
 impl Canvas<'_> {
+    /// Rows share the panel clock, so repainting never restarts the cascade.
+    pub fn row(&mut self, index: usize, f: impl FnOnce(&mut Self)) {
+        let frame = self.progress.row(index, self.now);
+        let mut matrix = Matrix3x2::identity();
+        unsafe {
+            self.t.GetTransform(&mut matrix);
+            let mut shifted = matrix;
+            shifted.M31 += matrix.M21 * frame.y;
+            shifted.M32 += matrix.M22 * frame.y;
+            self.t.SetTransform(&shifted);
+            push_opacity(self.t, self.w, self.h, frame.opacity);
+        }
+        // shortcut: rows use opacity and offset, avoiding one offscreen blur pass per row per frame.
+        f(self);
+        unsafe {
+            if frame.opacity < 1.0 {
+                self.t.PopLayer();
+            }
+            self.t.SetTransform(&matrix);
+        }
+    }
+
     fn brush(&self, c: Rgba) -> Option<ID2D1SolidColorBrush> {
         unsafe { self.t.CreateSolidColorBrush(&color(c), None).ok() }
     }
@@ -852,17 +947,16 @@ pub struct Panel {
     pub top: i32,
     /// The window that was in front before the panel opened; focus goes back there.
     pub prev: HWND,
-    pub pose: Pose,
+    pub family: Family,
     pub anchor_bottom: bool,
+    pub anchor_x: f32,
 }
 
 impl Panel {
     pub fn new(field_part: isize, card_part: isize, width: f32, field_h: f32) -> Self {
         let capsule = Surface::new(field_part, None, true);
-        let mut card = Surface::new(card_part, Some(capsule.hwnd), false);
-        card.motion = capsule.motion.clone();
-        card.motion_origin = (0.0, field_h + GAP);
-        Self { capsule, card, width, field_h, card_h: 0.0, scale: 1.0, x: 0, top: 0, prev: HWND::default(), pose: Pose::Drop, anchor_bottom: false }
+        let card = Surface::new(card_part, Some(capsule.hwnd), false);
+        Self { capsule, card, width, field_h, card_h: 0.0, scale: 1.0, x: 0, top: 0, prev: HWND::default(), family: Family::Drop, anchor_bottom: false, anchor_x: 0.0 }
     }
 
     pub fn px(&self, dip: f32) -> i32 {
@@ -912,8 +1006,11 @@ impl Panel {
             self.capsule.backdrop = b.clone();
             self.card.backdrop = b;
         }
-        let anchor = (self.width / 2.0, if self.anchor_bottom { self.field_h + GAP + self.card_h } else { 0.0 });
-        self.capsule.enter(self.pose, anchor, tokens::motion::PANEL);
+        let anchor = if self.family == Family::Clipboard {
+            (self.anchor_x, if self.anchor_bottom { self.field_h + GAP + self.card_h } else { 0.0 })
+        } else { (self.width / 2.0, 0.0) };
+        self.capsule.enter(self.family, anchor);
+        self.card.enter(Family::Card, (self.width / 2.0, 0.0));
         unsafe {
             let flags = SWP_SHOWWINDOW | if activate { SET_WINDOW_POS_FLAGS(0) } else { SWP_NOACTIVATE };
             let _ = SetWindowPos(self.capsule.hwnd, Some(HWND_TOPMOST), self.x, self.top, w, self.px(self.field_h), flags);
@@ -941,11 +1038,10 @@ impl Panel {
                 return;
             }
             let y = self.top + self.px(self.field_h + GAP);
-            self.card.motion_origin = (0.0, (y - self.top) as f32 / self.scale);
             let _ = SetWindowPos(self.card.hwnd, Some(HWND_TOPMOST), self.x, y, self.px(self.width), self.px(self.card_h), SWP_SHOWWINDOW | SWP_NOACTIVATE);
         }
         self.card.keep_lit();
-        if self.capsule.motion.get().active(Instant::now()) {
+        if self.card.motion.get().active(Instant::now()) {
             self.card.animate();
         }
     }
@@ -960,10 +1056,8 @@ impl Panel {
                 let _ = SetForegroundWindow(self.prev);
             }
         }
-        self.capsule.exit((self.width / 2.0, if matches!(self.pose, Pose::Drop) { 0.0 } else { (self.field_h + GAP + self.card_h) / 2.0 }));
-        if self.card.visible() {
-            self.card.animate();
-        }
+        self.capsule.exit((self.width / 2.0, 0.0));
+        self.card.exit((self.width / 2.0, 0.0));
     }
 
     /// Window rectangles for `--dump`: "x y w h" in pixels, or "hidden".
@@ -1173,11 +1267,11 @@ pub fn toast(text: &str, at: POINT) {
         } else {
             (fit(at.x - w / 2, m.work.left + 8, m.work.right - w - 8), fit(at.y - h / 2, m.work.top + 8, m.work.bottom - h - 8))
         };
-        hud.surface.enter(Pose::Pop, (w_dip / 2.0, 22.0), tokens::motion::POP);
+        hud.surface.enter(Family::Bloom, (w_dip / 2.0, 22.0));
         unsafe {
             let _ = SetWindowPos(hud.surface.hwnd, Some(HWND_TOPMOST), x, y, w, h, SWP_SHOWWINDOW | SWP_NOACTIVATE);
             hud.surface.keep_lit();
-            let hold = motion::duration(tokens::motion::POP).as_millis().saturating_add(1300).min(u32::MAX as u128) as u32;
+            let hold = motion::duration(livae_core::motion::FOCUS_MS + 1300).as_millis().min(u32::MAX as u128) as u32;
             let _ = SetTimer(Some(hud.surface.hwnd), 1, hold, None);
         }
         draw_hud(hud);
@@ -1254,7 +1348,7 @@ pub fn notice(text: &str, button: &str, top: POINT) {
         let (w, h) = ((n.width * m.scale).round() as i32, (NOTICE_H * m.scale).round() as i32);
         let (x, y) = if crate::config::offscreen() { offscreen_origin() } else { (top.x - w / 2, top.y) };
         if !n.surface.showing() {
-            n.surface.enter(Pose::Pop, (n.width / 2.0, NOTICE_H / 2.0), tokens::motion::POP);
+            n.surface.enter(Family::Bloom, (n.width / 2.0, NOTICE_H / 2.0));
         }
         unsafe {
             let _ = SetWindowPos(n.surface.hwnd, Some(HWND_TOPMOST), x, y, w, h, SWP_SHOWWINDOW | SWP_NOACTIVATE);

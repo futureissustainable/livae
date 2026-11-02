@@ -867,40 +867,43 @@ impl Launcher {
         let target = (INSET + self.selected.saturating_sub(self.first) as f32 * ROW_H, ROW_H);
         let ((band_y, band_h), moving) = self.band.at(target, self.first);
         self.panel.card.band_timer(moving);
+        self.panel.card.rows(rows.len());
         self.panel.card.draw(scale, |c| {
             c.glass(dark);
-            if rows.iter().any(|r| r.on) {
-                c.round(INSET, band_y, WIDTH - 2.0 * INSET, band_h, BAND_RADIUS, glass::white(BAND));
-            }
-            for r in &rows {
-                if let Some((key, source)) = &r.icon {
-                    c.picture(key, source, EDGE + 3.0, r.y + (ROW_H - ICON) / 2.0, ICON, ICON, 0.0);
-                }
-                let color = if r.quiet { TERTIARY } else { TEXT };
-                if r.answer {
-                    let tw = g.width(&r.title, &answer).min(right - TEXT_X);
-                    c.text(&r.title, &answer, TEXT_X, r.y, right - TEXT_X, ROW_H, color);
-                    if !r.detail.is_empty() {
-                        let dx = TEXT_X + tw + 12.0;
-                        c.text(&r.detail, &small, dx, r.y, (right - dx).max(1.0), ROW_H, SECONDARY);
+            for (index, r) in rows.iter().enumerate() {
+                c.row(index, |c| {
+                    if r.on {
+                        c.round(INSET, band_y, WIDTH - 2.0 * INSET, band_h, BAND_RADIUS, glass::white(BAND));
                     }
-                } else if r.file {
-                    let title = g.fit(&r.title, &body, 420.0, Trim::Middle);
-                    c.text(&title, &body, TEXT_X, r.y, 424.0, ROW_H, color);
-                    let dx = TEXT_X + name_col + 16.0;
-                    let folder = g.fit(&r.detail, &small, (right - dx).max(0.0), Trim::Head);
-                    c.text(&folder, &small, dx, r.y, (right - dx).max(1.0), ROW_H, SECONDARY);
-                } else {
-                    let tw = g.width(&r.title, &body).min(right - TEXT_X);
-                    c.text(&r.title, &body, TEXT_X, r.y, right - TEXT_X, ROW_H, color);
-                    if !r.detail.is_empty() {
-                        let dx = TEXT_X + tw + 12.0;
-                        c.text(&r.detail, &small, dx, r.y, (right - dx).max(1.0), ROW_H, SECONDARY);
+                    if let Some((key, source)) = &r.icon {
+                        c.picture(key, source, EDGE + 3.0, r.y + (ROW_H - ICON) / 2.0, ICON, ICON, 0.0);
                     }
-                }
-                if !r.hint.is_empty() {
-                    c.text(&r.hint, &hint_fmt, WIDTH - EDGE - hint_w, r.y, hint_w, ROW_H, SECONDARY);
-                }
+                    let color = if r.quiet { TERTIARY } else { TEXT };
+                    if r.answer {
+                        let tw = g.width(&r.title, &answer).min(right - TEXT_X);
+                        c.text(&r.title, &answer, TEXT_X, r.y, right - TEXT_X, ROW_H, color);
+                        if !r.detail.is_empty() {
+                            let dx = TEXT_X + tw + 12.0;
+                            c.text(&r.detail, &small, dx, r.y, (right - dx).max(1.0), ROW_H, SECONDARY);
+                        }
+                    } else if r.file {
+                        let title = g.fit(&r.title, &body, 420.0, Trim::Middle);
+                        c.text(&title, &body, TEXT_X, r.y, 424.0, ROW_H, color);
+                        let dx = TEXT_X + name_col + 16.0;
+                        let folder = g.fit(&r.detail, &small, (right - dx).max(0.0), Trim::Head);
+                        c.text(&folder, &small, dx, r.y, (right - dx).max(1.0), ROW_H, SECONDARY);
+                    } else {
+                        let tw = g.width(&r.title, &body).min(right - TEXT_X);
+                        c.text(&r.title, &body, TEXT_X, r.y, right - TEXT_X, ROW_H, color);
+                        if !r.detail.is_empty() {
+                            let dx = TEXT_X + tw + 12.0;
+                            c.text(&r.detail, &small, dx, r.y, (right - dx).max(1.0), ROW_H, SECONDARY);
+                        }
+                    }
+                    if !r.hint.is_empty() {
+                        c.text(&r.hint, &hint_fmt, WIDTH - EDGE - hint_w, r.y, hint_w, ROW_H, SECONDARY);
+                    }
+                });
             }
         });
     }

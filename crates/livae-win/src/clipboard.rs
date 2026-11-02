@@ -361,7 +361,7 @@ pub fn install() {
         high: None,
         mouse: POINT::default(),
     };
-    c.panel.pose = crate::motion::Pose::Clipboard;
+    c.panel.family = crate::motion::Family::Clipboard;
     CLIPBOARD.with(|cell| *cell.borrow_mut() = Some(c));
     // Whatever is on the clipboard now is the first item.
     changed();
@@ -672,6 +672,7 @@ impl Clipboard {
         let top = glass::fit(top, m.work.top + edge, m.work.bottom - total - edge);
         self.panel.x = x;
         self.panel.top = top;
+        self.panel.anchor_x = ((anchor_x - x) as f32 / self.panel.scale).clamp(0.0, WIDTH);
     }
 
     fn hide(&mut self, restore: bool) {
@@ -890,66 +891,70 @@ impl Clipboard {
         let target = self.slots.get(self.selected.saturating_sub(self.first)).copied().unwrap_or((INSET, 44.0));
         let ((band_y, band_h), moving) = self.band.at(target, self.first);
         self.panel.card.band_timer(moving);
+        self.panel.card.rows(rows.len());
+        let selected = self.selected.saturating_sub(self.first);
         self.panel.card.draw(scale, |cv| {
             cv.glass(dark);
-            if !rows.is_empty() {
-                cv.round(INSET, band_y, WIDTH - 2.0 * INSET, band_h, BAND_RADIUS, glass::white(BAND));
-            }
             if rows.is_empty() {
                 cv.text(&empty_msg, &body, TEXT_X, INSET, WIDTH - TEXT_X - EDGE, 44.0, TERTIARY);
                 return;
             }
-            for ((y, h, clip), (title, detail)) in rows.iter().zip(&texts) {
-                let (y, h) = (*y, *h);
-                let mid = y + h / 2.0;
-                // Age, quiet and right-aligned; the pin sits right before the age text.
-                let age = history::ago(now, clip.time);
-                cv.text(&age, &small_right, WIDTH - EDGE - TIME_W, y, TIME_W, h, TERTIARY);
-                if clip.pinned {
-                    let aw = g.width(&age, &small);
-                    cv.glyph(glyph::PIN, 12.0, WIDTH - EDGE - aw - 20.0, y, 14.0, h, TERTIARY);
-                }
-                match clip.kind {
-                    Kind::Image => {
-                        // The picture starts where text starts, at its own shape; only its size is added.
-                        let aspect = if clip.h > 0 { clip.w as f32 / clip.h as f32 } else { 1.0 };
-                        let (tw, th) = if aspect >= THUMB_W / THUMB_H { (THUMB_W, THUMB_W / aspect) } else { (THUMB_H * aspect, THUMB_H) };
-                        let (tw, th) = (tw.max(12.0), th.max(12.0));
-                        if let Some(name) = &clip.image {
-                            let source = format!("thumb:{}", dir.join(name).display());
-                            cv.picture(&format!("thumb:{name}"), &source, TEXT_X, mid - th / 2.0, tw, th, 8.0);
-                        }
-                        let x = TEXT_X + tw + 14.0;
-                        cv.text(detail, &small, x, y, (text_right - x).max(1.0), h, TERTIARY);
+            for (index, ((y, h, clip), (title, detail))) in rows.iter().zip(&texts).enumerate() {
+                cv.row(index, |cv| {
+                    if index == selected {
+                        cv.round(INSET, band_y, WIDTH - 2.0 * INSET, band_h, BAND_RADIUS, glass::white(BAND));
                     }
-                    Kind::File => {
-                        let name = g.fit(title, &body, 260.0, Trim::Middle);
-                        let nw = g.width(&name, &body).min(264.0);
-                        cv.text(&name, &body, TEXT_X, y, nw + 4.0, h, TEXT);
-                        let dx = TEXT_X + nw + 12.0;
-                        let folder = g.fit(detail, &small, (text_right - dx).max(0.0), Trim::Head);
-                        cv.text(&folder, &small, dx, y, (text_right - dx).max(1.0), h, SECONDARY);
+                    let (y, h) = (*y, *h);
+                    let mid = y + h / 2.0;
+                    // Age, quiet and right-aligned; the pin sits right before the age text.
+                    let age = history::ago(now, clip.time);
+                    cv.text(&age, &small_right, WIDTH - EDGE - TIME_W, y, TIME_W, h, TERTIARY);
+                    if clip.pinned {
+                        let aw = g.width(&age, &small);
+                        cv.glyph(glyph::PIN, 12.0, WIDTH - EDGE - aw - 20.0, y, 14.0, h, TERTIARY);
                     }
-                    kind => {
-                        let mut x = TEXT_X;
-                        if kind == Kind::Color {
-                            // The swatch is the content, so it stays: in the text column, the code after it.
-                            if let Some((r, gr, b)) = livae_core::clip::color_of(clip.text.trim()) {
-                                cv.round(TEXT_X, mid - 9.0, 18.0, 18.0, 9.0, glass::Rgba(r as f32, gr as f32, b as f32, 1.0));
+                    match clip.kind {
+                        Kind::Image => {
+                            // The picture starts where text starts, at its own shape; only its size is added.
+                            let aspect = if clip.h > 0 { clip.w as f32 / clip.h as f32 } else { 1.0 };
+                            let (tw, th) = if aspect >= THUMB_W / THUMB_H { (THUMB_W, THUMB_W / aspect) } else { (THUMB_H * aspect, THUMB_H) };
+                            let (tw, th) = (tw.max(12.0), th.max(12.0));
+                            if let Some(name) = &clip.image {
+                                let source = format!("thumb:{}", dir.join(name).display());
+                                cv.picture(&format!("thumb:{name}"), &source, TEXT_X, mid - th / 2.0, tw, th, 8.0);
                             }
-                            x += 28.0;
+                            let x = TEXT_X + tw + 14.0;
+                            cv.text(detail, &small, x, y, (text_right - x).max(1.0), h, TERTIARY);
                         }
-                        let fmt = if kind == Kind::Code { &code } else { &body };
-                        let w = text_right - x;
-                        let (l1, l2) = if h > 44.0 && detail.is_empty() { g.two_lines(title, fmt, w) } else { (title.clone(), detail.clone()) };
-                        if h > 44.0 && !l2.is_empty() {
-                            cv.text(&l1, fmt, x, mid - 21.0, w, 21.0, TEXT);
-                            cv.text(&l2, fmt, x, mid, w, 21.0, TEXT);
-                        } else {
-                            cv.text(&l1, fmt, x, y, w, h, TEXT);
+                        Kind::File => {
+                            let name = g.fit(title, &body, 260.0, Trim::Middle);
+                            let nw = g.width(&name, &body).min(264.0);
+                            cv.text(&name, &body, TEXT_X, y, nw + 4.0, h, TEXT);
+                            let dx = TEXT_X + nw + 12.0;
+                            let folder = g.fit(detail, &small, (text_right - dx).max(0.0), Trim::Head);
+                            cv.text(&folder, &small, dx, y, (text_right - dx).max(1.0), h, SECONDARY);
+                        }
+                        kind => {
+                            let mut x = TEXT_X;
+                            if kind == Kind::Color {
+                                // The swatch is the content, so it stays: in the text column, the code after it.
+                                if let Some((r, gr, b)) = livae_core::clip::color_of(clip.text.trim()) {
+                                    cv.round(TEXT_X, mid - 9.0, 18.0, 18.0, 9.0, glass::Rgba(r as f32, gr as f32, b as f32, 1.0));
+                                }
+                                x += 28.0;
+                            }
+                            let fmt = if kind == Kind::Code { &code } else { &body };
+                            let w = text_right - x;
+                            let (l1, l2) = if h > 44.0 && detail.is_empty() { g.two_lines(title, fmt, w) } else { (title.clone(), detail.clone()) };
+                            if h > 44.0 && !l2.is_empty() {
+                                cv.text(&l1, fmt, x, mid - 21.0, w, 21.0, TEXT);
+                                cv.text(&l2, fmt, x, mid, w, 21.0, TEXT);
+                            } else {
+                                cv.text(&l1, fmt, x, y, w, h, TEXT);
+                            }
                         }
                     }
-                }
+                });
             }
         });
     }

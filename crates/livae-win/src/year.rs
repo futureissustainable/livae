@@ -415,7 +415,7 @@ impl Ui {
         let x = glass::fit(self.x + self.px(cell(d).0 + CELL / 2.0 - CARD_W / 2.0), self.x, self.x + self.px(W - CARD_W));
         let above = self.y - 10 - h;
         let y = if above < self.work.top && !config::offscreen() { self.y + self.px(height(&self.state)) + 10 } else { above };
-        self.card.enter(crate::motion::Pose::Rise, (CARD_W / 2.0, card_height(&self.state, d) / 2.0), livae_core::tokens::motion::PANEL);
+        self.card.enter(crate::motion::Family::Bloom, (CARD_W / 2.0, card_height(&self.state, d) / 2.0));
         unsafe {
             let _ = SetWindowPos(self.card.hwnd, Some(HWND_TOPMOST), x, y, self.px(CARD_W), h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
         }
@@ -470,7 +470,7 @@ pub fn show() {
     with(|u| {
         if u.board.visible() {
             u.showing = true;
-            u.board.enter(crate::motion::Pose::Rise, (W / 2.0, height(&u.state) / 2.0), livae_core::tokens::motion::PANEL);
+            u.board.enter(crate::motion::Family::Bloom, (W / 2.0, height(&u.state) / 2.0));
             u.place();
             u.paint();
             unsafe { SetTimer(Some(u.board.hwnd), 1, 1000, None); }
@@ -503,7 +503,7 @@ pub fn show() {
             u.board.backdrop = backdrop.clone();
             u.card.backdrop = backdrop;
         }
-        u.board.enter(crate::motion::Pose::Rise, (W / 2.0, height(&u.state) / 2.0), livae_core::tokens::motion::PANEL);
+        u.board.enter(crate::motion::Family::Bloom, (W / 2.0, height(&u.state) / 2.0));
         u.showing = true;
         unsafe {
             let flags = SWP_SHOWWINDOW | if config::offscreen() { SWP_NOACTIVATE } else { SET_WINDOW_POS_FLAGS(0) };

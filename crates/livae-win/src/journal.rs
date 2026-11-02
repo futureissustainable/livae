@@ -1113,7 +1113,7 @@ impl Ui {
         let offscreen = config::offscreen();
         if self.panel.visible() {
             self.showing = true;
-            self.panel.enter(crate::motion::Pose::Rise, (W / 2.0, self.h / 2.0), tokens::motion::PANEL);
+            self.panel.enter(crate::motion::Family::Bloom, (W / 2.0, self.h / 2.0));
             self.paint();
             if !offscreen {
                 glass::bring_to_front(self.panel.hwnd);
@@ -1163,7 +1163,7 @@ impl Ui {
             SendMessageW(self.note, EM_SCROLLCARET, None, None);
         }
         self.freeze_note();
-        self.panel.enter(crate::motion::Pose::Rise, (W / 2.0, l.h / 2.0), tokens::motion::PANEL);
+        self.panel.enter(crate::motion::Family::Bloom, (W / 2.0, l.h / 2.0));
         unsafe {
             let flags = SWP_SHOWWINDOW | if offscreen { SWP_NOACTIVATE } else { SET_WINDOW_POS_FLAGS(0) };
             let _ = SetWindowPos(self.panel.hwnd, Some(HWND_TOPMOST), x, y, w, h, flags);
