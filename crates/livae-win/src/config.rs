@@ -68,6 +68,7 @@ pub const HEADER: &str = "# Livae settings. Save the file and Livae applies it w
 # glass: 0 clear to 1 dark. paste: paste the chosen clipboard item into the app in front.\n\
 # file_search: extra folders to search besides Desktop, Documents and Downloads (\"~\" is your user folder).\n\
 # ignore_apps: programs whose copies are never recorded (the name without .exe).\n\
+# results: rows the search shows at once (4 to 15); the clipboard panel is the same size.\n\
 # currency: default currency code, e.g. \"EUR\"; empty uses your region.\n\
 # expansion: turn typed triggers on or off.\n\
 # [[snippets]]: trigger and text; {date} {time} {clipboard} {cursor}.\n\

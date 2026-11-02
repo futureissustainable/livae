@@ -29,15 +29,20 @@ use crate::list::{List, Owner};
 use crate::panel::{Controller, Event, Panel};
 use crate::ui::{self, SECONDARY, TERTIARY, TEXT};
 
-const WIDTH: f64 = 600.0;
-const FIELD_H: f64 = 56.0;
+/// The search's size: as wide, the same capsule, and a list never taller than the search's (Results shown).
+const WIDTH: f64 = 720.0;
+const FIELD_H: f64 = 72.0;
+const QUERY: f64 = livae_core::tokens::text::H3.size;
+/// The search's row height: the list is at most this many rows of it tall, whatever its own rows are.
+const SEARCH_ROW_H: f64 = 44.0;
 const GAP: f64 = 10.0;
 const INSET: f64 = 8.0;
 const EDGE: f64 = 16.0;
 /// The text column. No kind icons: text starts where the search icon starts.
 const TEXT_X: f64 = 24.0;
 const CARD_RADIUS: f64 = 24.0;
-const SLOTS: usize = 8;
+/// The most row views; how many show depends on their heights and the list's height.
+const SLOTS: usize = livae_core::settings::RESULTS_MAX;
 const THUMB_W: f64 = 120.0;
 const THUMB_H: f64 = 68.0;
 
@@ -161,13 +166,13 @@ pub fn install(mtm: MainThreadMarker) {
     let s = config::get();
 
     let capsule = Glass::new(mtm, FIELD_H / 2.0, s.glass.max(0.6));
-    let (search_icon, field, _font) = ui::search_field(mtm, &controller, "Search clipboard", WIDTH, 20.0, FIELD_H);
+    let (search_icon, field, _font) = ui::search_field(mtm, &controller, "Search clipboard", WIDTH, QUERY, FIELD_H);
     if let Some(img) = ui::symbol("doc.on.clipboard") {
         search_icon.setImage(Some(&img));
     }
     capsule.content.addSubview(&search_icon);
     capsule.content.addSubview(&field);
-    let caret = crate::caret::Caret::new(mtm, &capsule.content, 26.0);
+    let caret = crate::caret::Caret::new(mtm, &capsule.content, QUERY + 6.0);
 
     let card = Glass::new(mtm, CARD_RADIUS, s.glass.max(0.6) * 0.85);
     let list = List::new(mtm, Owner::Clipboard);
@@ -186,8 +191,15 @@ pub fn install(mtm: MainThreadMarker) {
                 layer.setMasksToBounds(true);
             }
             let swatch = ui::band(mtm, 9.0);
-            let title = ui::label(mtm, 16.0, TEXT);
+            // Wraps to two lines, the second cut with an ellipsis when the text goes on.
+            let title = NSTextField::wrappingLabelWithString(ns_string!(""), mtm);
+            title.setFont(Some(&crate::font::regular(16.0)));
+            title.setTextColor(Some(&ui::rgb(TEXT)));
+            title.setSelectable(false);
             title.setMaximumNumberOfLines(2);
+            if let Some(cell) = title.cell() {
+                cell.setTruncatesLastVisibleLine(true);
+            }
             let detail = ui::label(mtm, 14.0, SECONDARY);
             let time = ui::label(mtm, 14.0, TERTIARY);
             time.setAlignment(NSTextAlignment::Right);
@@ -510,6 +522,39 @@ impl Clipboard {
         self.layout();
     }
 
+    /// The list's room for rows: as tall as the search's list at Results shown.
+    fn room() -> f64 {
+        config::get().rows() as f64 * SEARCH_ROW_H
+    }
+
+    /// How many items fit from `first` (at least one).
+    fn fit_from(&self, first: usize) -> usize {
+        let (room, mut used, mut n) = (Self::room(), 0.0, 0);
+        for &i in self.shown.iter().skip(first).take(SLOTS) {
+            used += Self::row_height(&self.history.clips[i]);
+            if used > room && n > 0 {
+                break;
+            }
+            n += 1;
+        }
+        n.max(1)
+    }
+
+    /// The first item to show so that `last` is the bottom row.
+    fn first_ending_at(&self, last: usize) -> usize {
+        let (room, mut first) = (Self::room(), last);
+        let mut used = Self::row_height(&self.history.clips[self.shown[last]]);
+        while first > 0 && last - first + 1 < SLOTS {
+            let h = Self::row_height(&self.history.clips[self.shown[first - 1]]);
+            if used + h > room {
+                break;
+            }
+            used += h;
+            first -= 1;
+        }
+        first
+    }
+
     fn move_selection(&mut self, by: isize) {
         if self.shown.is_empty() {
             return;
@@ -519,8 +564,8 @@ impl Clipboard {
         if self.selected < self.first {
             self.first = self.selected;
             self.layout();
-        } else if self.selected >= self.first + SLOTS {
-            self.first = self.selected + 1 - SLOTS;
+        } else if self.selected >= self.first + self.fit_from(self.first) {
+            self.first = self.first_ending_at(self.selected);
             self.layout();
         } else {
             self.paint_selection(true);
@@ -605,7 +650,8 @@ impl Clipboard {
     fn row_height(clip: &Clip) -> f64 {
         match clip.kind {
             Kind::Image => THUMB_H + 12.0,
-            Kind::Text | Kind::Code if clip.text.trim().contains('\n') || clip.text.trim().chars().nth(58).is_some() => 60.0,
+            // Two lines: a line break, or more than about one line of text at this width.
+            Kind::Text | Kind::Code if clip.text.trim().contains('\n') || clip.text.trim().chars().nth(72).is_some() => 60.0,
             _ => 44.0,
         }
     }
@@ -624,7 +670,7 @@ impl Clipboard {
     }
 
     fn layout(&mut self) {
-        let visible: Vec<usize> = self.shown.iter().skip(self.first).take(SLOTS).copied().collect();
+        let visible: Vec<usize> = self.shown.iter().skip(self.first).take(self.fit_from(self.first)).copied().collect();
         let empty = visible.is_empty();
         let heights: Vec<f64> = if empty { vec![44.0] } else { visible.iter().map(|&i| Self::row_height(&self.history.clips[i])).collect() };
         let card_h = INSET + heights.iter().sum::<f64>() + INSET;

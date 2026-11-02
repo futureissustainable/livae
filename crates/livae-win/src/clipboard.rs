@@ -35,15 +35,20 @@ use crate::glass::{self, glyph, gfx, Font, Panel, Trim, BAND, BAND_RADIUS, SECON
 use crate::shell::{self, Pixels};
 use crate::{app, config};
 
-const WIDTH: f32 = 600.0;
-const FIELD_H: f32 = 56.0;
+/// The search's size: as wide, the same capsule, and a list never taller than the search's (Results shown).
+const WIDTH: f32 = 720.0;
+const FIELD_H: f32 = 72.0;
+const QUERY: f32 = livae_core::tokens::text::H3.size as f32;
+/// The search's row height: the list is at most Results shown rows of it tall, whatever its own rows are.
+const SEARCH_ROW_H: f32 = 46.0;
 const INSET: f32 = 8.0;
 const EDGE: f32 = 16.0;
 /// The text column. No kind icons: text starts where the search icon starts.
 const TEXT_X: f32 = 24.0;
 /// The field's text in its capsule, after the search icon.
 const FIELD_X: f32 = 56.0;
-const SLOTS: usize = 4;
+/// The most rows on screen; how many show depends on their heights and the list's height.
+const SLOTS: usize = livae_core::settings::RESULTS_MAX;
 const THUMB_W: f32 = 120.0;
 const THUMB_H: f32 = 68.0;
 /// The quiet time column at the right.
@@ -700,8 +705,41 @@ impl Clipboard {
         }
     }
 
+    /// The list's room for rows: as tall as the search's list at Results shown.
+    fn room() -> f32 {
+        livae_core::settings::rows_shown(config::get().results) as f32 * SEARCH_ROW_H
+    }
+
+    /// How many items fit from `first` (at least one).
+    fn fit_from(&self, first: usize) -> usize {
+        let (room, mut used, mut n) = (Self::room(), 0.0, 0);
+        for &i in self.shown.iter().skip(first).take(SLOTS) {
+            used += Self::row_h(&self.history.clips[i]);
+            if used > room && n > 0 {
+                break;
+            }
+            n += 1;
+        }
+        n.max(1)
+    }
+
+    /// The first item to show so that `last` is the bottom row.
+    fn first_ending_at(&self, last: usize) -> usize {
+        let (room, mut first) = (Self::room(), last);
+        let mut used = Self::row_h(&self.history.clips[self.shown[last]]);
+        while first > 0 && last - first + 1 < SLOTS {
+            let h = Self::row_h(&self.history.clips[self.shown[first - 1]]);
+            if used + h > room {
+                break;
+            }
+            used += h;
+            first -= 1;
+        }
+        first
+    }
+
     fn layout(&mut self) {
-        let visible: Vec<usize> = self.shown.iter().skip(self.first).take(SLOTS).copied().collect();
+        let visible: Vec<usize> = self.shown.iter().skip(self.first).take(self.fit_from(self.first)).copied().collect();
         self.slots.clear();
         let mut y = INSET;
         if visible.is_empty() {
@@ -725,16 +763,18 @@ impl Clipboard {
         self.selected = (self.selected as isize + by).rem_euclid(n) as usize;
         if self.selected < self.first {
             self.first = self.selected;
-        } else if self.selected >= self.first + SLOTS {
-            self.first = self.selected + 1 - SLOTS;
+        } else if self.selected >= self.first + self.fit_from(self.first) {
+            self.first = self.first_ending_at(self.selected);
         }
         self.layout();
     }
 
     fn scroll(&mut self, rows: isize) {
-        let max_first = self.shown.len().saturating_sub(SLOTS) as isize;
+        let Some(last) = self.shown.len().checked_sub(1) else { return };
+        let max_first = self.first_ending_at(last) as isize;
         self.first = (self.first as isize + rows).clamp(0, max_first) as usize;
-        self.selected = self.selected.clamp(self.first, (self.first + SLOTS - 1).min(self.shown.len().saturating_sub(1)));
+        let fit = self.fit_from(self.first);
+        self.selected = self.selected.clamp(self.first, (self.first + fit - 1).min(last));
         self.layout();
     }
 
@@ -792,7 +832,7 @@ impl Clipboard {
         self.panel.capsule.draw(scale, |c| {
             c.glass(dark);
             c.glyph(glyph::CLIPBOARD, 18.0, EDGE + 2.0, 0.0, 28.0, c.h, SECONDARY);
-            let fmt = gfx().format(Font::Sans, 20.0, DWRITE_FONT_WEIGHT_NORMAL, false, false);
+            let fmt = gfx().format(Font::Sans, QUERY, DWRITE_FONT_WEIGHT_NORMAL, false, false);
             at = Some(c.field(field, &fmt, FIELD_X, WIDTH - FIELD_X - EDGE, "Search clipboard", caret));
         });
         if let Some(at) = at {
@@ -932,8 +972,8 @@ impl Clipboard {
             VK_RETURN => self.paste(self.selected),
             VK_DOWN => self.move_selection(1),
             VK_UP => self.move_selection(-1),
-            VK_NEXT => self.move_selection(SLOTS as isize),
-            VK_PRIOR => self.move_selection(-(SLOTS as isize)),
+            VK_NEXT => self.move_selection(self.fit_from(self.first) as isize),
+            VK_PRIOR => self.move_selection(-(self.fit_from(self.first) as isize)),
             VK_DELETE if cmd => self.delete(),
             VK_LEFT => self.field.left(shift, cmd),
             VK_RIGHT => self.field.right(shift, cmd),

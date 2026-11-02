@@ -28,6 +28,8 @@ pub struct Settings {
     pub file_search: Vec<String>,
     /// Show the most used apps on the empty launcher (off unless turned on).
     pub recent_apps: bool,
+    /// Rows the search shows at once; the clipboard panel is the same size.
+    pub results: u32,
     /// Break reminders (the Stretchly Zen schedule).
     pub breaks: Breaks,
     /// The evening journal (the Vesper prompt).
@@ -97,6 +99,7 @@ impl Default for Settings {
             history: c.history,
             file_search: c.file_search,
             recent_apps: c.recent_apps,
+            results: c.results,
             breaks: c.breaks,
             journal: c.journal,
             gate: Gate::default(),
@@ -135,6 +138,11 @@ impl Settings {
             .filter(|p| p.is_dir())
             .collect();
         if roots.is_empty() { vec![home()] } else { roots }
+    }
+
+    /// Rows on screen in the search and the clipboard.
+    pub fn rows(&self) -> usize {
+        livae_core::settings::rows_shown(self.results)
     }
 
     /// The currency money answers convert to when none is named: the setting, else the system's region.
@@ -209,6 +217,7 @@ pub fn update(f: impl FnOnce(&mut Settings)) {
 }
 
 const HEADER: &str = "# Livae settings. Change them in Livae → Settings, or here (Livae applies a saved edit within seconds).\n\
+# results: rows the search shows at once (4 to 15); the clipboard panel is the same size.\n\
 # currency: what money answers convert to when none is named (\"RON\", \"USD\"); empty: your region's.\n\
 # expansion + [[snippets]]: type a trigger in any app and it becomes the text; {date} {time} {clipboard} {cursor} fill in.\n\
 # [[quicklinks]]: the keyword, a space and words open the url with {query} replaced (\"gh livae\").\n\

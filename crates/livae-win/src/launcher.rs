@@ -42,8 +42,7 @@ const EDGE: f32 = 16.0;
 /// One text column: 16 edge + 26 icon + 14 gap; the field text starts at the same x in its capsule.
 const TEXT_X: f32 = 56.0;
 const ICON: f32 = 26.0;
-/// Rows on screen; the list scrolls through up to MAX_ITEMS.
-const MAX_ROWS: usize = 9;
+/// Items kept; the list scrolls through them, Results shown at a time.
 const MAX_ITEMS: usize = 40;
 /// Files kept in the name index (the newest shallow ones first, as the walk goes level by level).
 const MAX_INDEX: usize = 200_000;
@@ -148,6 +147,11 @@ fn with<R>(f: impl FnOnce(&mut Launcher) -> R) -> Option<R> {
 
 fn key_down(vk: VIRTUAL_KEY) -> bool {
     unsafe { GetKeyState(vk.0 as i32) < 0 }
+}
+
+/// Rows on screen: Results shown in the settings (the clipboard panel is the same size).
+fn rows_shown() -> usize {
+    livae_core::settings::rows_shown(config::get().results)
 }
 
 fn usage_file() -> PathBuf {
@@ -581,7 +585,7 @@ impl Launcher {
     }
 
     fn rows(&self) -> usize {
-        self.items.len().saturating_sub(self.first).min(MAX_ROWS)
+        self.items.len().saturating_sub(self.first).min(rows_shown())
     }
 
     fn layout(&mut self) {
@@ -601,17 +605,17 @@ impl Launcher {
         self.selected = (self.selected as isize + by).rem_euclid(n) as usize;
         if self.selected < self.first {
             self.first = self.selected;
-        } else if self.selected >= self.first + MAX_ROWS {
-            self.first = self.selected + 1 - MAX_ROWS;
+        } else if self.selected >= self.first + rows_shown() {
+            self.first = self.selected + 1 - rows_shown();
         }
         self.layout();
     }
 
     fn scroll(&mut self, rows: isize) {
         self.armed = None;
-        let max_first = self.items.len().saturating_sub(MAX_ROWS) as isize;
+        let max_first = self.items.len().saturating_sub(rows_shown()) as isize;
         self.first = (self.first as isize + rows).clamp(0, max_first) as usize;
-        self.selected = self.selected.clamp(self.first, (self.first + MAX_ROWS - 1).min(self.items.len().saturating_sub(1)));
+        self.selected = self.selected.clamp(self.first, (self.first + rows_shown() - 1).min(self.items.len().saturating_sub(1)));
         self.layout();
     }
 
@@ -924,8 +928,8 @@ impl Launcher {
             VK_RETURN => self.open(self.selected),
             VK_DOWN => self.move_selection(1),
             VK_UP => self.move_selection(-1),
-            VK_NEXT => self.move_selection(MAX_ROWS as isize),
-            VK_PRIOR => self.move_selection(-(MAX_ROWS as isize)),
+            VK_NEXT => self.move_selection(rows_shown() as isize),
+            VK_PRIOR => self.move_selection(-(rows_shown() as isize)),
             VK_LEFT => self.field.left(shift, cmd),
             VK_RIGHT => self.field.right(shift, cmd),
             VK_HOME => self.field.home(shift),

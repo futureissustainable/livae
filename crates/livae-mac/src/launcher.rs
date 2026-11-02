@@ -48,8 +48,8 @@ const INSET: f64 = 8.0;
 const EDGE: f64 = 16.0;
 /// One text column: 16 edge + 24 icon + 12 gap (the field starts at 56 in its capsule, same optical column).
 const TEXT_X: f64 = 56.0;
-/// Rows on screen; the list scrolls through up to MAX_ITEMS.
-const MAX_ROWS: usize = 9;
+/// The most rows on screen (Settings › Results shown picks how many); the list scrolls through up to MAX_ITEMS.
+const MAX_ROWS: usize = livae_core::settings::RESULTS_MAX;
 const MAX_ITEMS: usize = 40;
 const CARD_RADIUS: f64 = 24.0;
 
@@ -169,7 +169,7 @@ pub fn run_command(def: &Def, front: Option<&NSRunningApplication>) {
 pub fn dump() -> String {
     let mut out = String::new();
     with(|l| {
-        for (n, item) in l.items.iter().enumerate().take(MAX_ROWS) {
+        for (n, item) in l.items.iter().enumerate().take(config::get().rows()) {
             let (title, detail) = l.texts(n, item);
             out.push_str(&format!("{}\t{title}\t{detail}\n", n + 1));
         }
@@ -748,8 +748,8 @@ impl Launcher {
         if self.selected < self.first {
             self.first = self.selected;
             self.layout();
-        } else if self.selected >= self.first + MAX_ROWS {
-            self.first = self.selected + 1 - MAX_ROWS;
+        } else if self.selected >= self.first + config::get().rows() {
+            self.first = self.selected + 1 - config::get().rows();
             self.layout();
         } else {
             self.paint_selection(true);
@@ -909,7 +909,7 @@ impl Launcher {
             let i = self.first + slot;
             let item = self.items.get(i);
             let selectable = !matches!(item, Some(Item::Empty | Item::Searching) | None);
-            if i == self.selected && selectable && slot < MAX_ROWS.min(self.items.len().saturating_sub(self.first)) {
+            if i == self.selected && selectable && slot < config::get().rows().min(self.items.len().saturating_sub(self.first)) {
                 let y = self.card_h - INSET - (slot as f64 + 1.0) * ROW_H;
                 band = Some(NSRect::new(NSPoint::new(INSET, y), NSSize::new(WIDTH - 2.0 * INSET, ROW_H)));
             }
@@ -931,7 +931,7 @@ impl Launcher {
 
     /// Size the window to the capsule plus the card (top edge fixed) and place every view.
     fn layout(&mut self) {
-        let n = self.items.len().saturating_sub(self.first).min(MAX_ROWS);
+        let n = self.items.len().saturating_sub(self.first).min(config::get().rows());
         let card_h = if n > 0 { INSET + n as f64 * ROW_H + INSET } else { 0.0 };
         self.card_h = card_h;
         let h = FIELD_H + if n > 0 { GAP + card_h } else { 0.0 };

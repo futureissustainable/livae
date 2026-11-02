@@ -36,6 +36,8 @@ pub struct Settings {
     pub file_search: Vec<String>,
     /// Show the most used apps on the empty launcher (off unless turned on).
     pub recent_apps: bool,
+    /// Rows the search shows at once; the clipboard panel is the same size (see `rows_shown`).
+    pub results: u32,
     /// Apps whose copies the clipboard never records: bundle ids on the Mac, program names on the PC ("KeePass").
     pub ignore_apps: Vec<String>,
     /// Break reminders (the Stretchly Zen schedule).
@@ -70,6 +72,7 @@ impl Settings {
             history: 500,
             file_search,
             recent_apps: false,
+            results: 9,
             ignore_apps,
             breaks: Breaks::default(),
             journal: Journal::defaults_for(platform),
@@ -196,6 +199,14 @@ impl Default for Settings {
     fn default() -> Self {
         Self::defaults_for(Platform::current())
     }
+}
+
+/// The most rows a panel shows at once (and the row views each one keeps).
+pub const RESULTS_MAX: usize = 15;
+
+/// `results` as rows on screen: 4 to RESULTS_MAX.
+pub fn rows_shown(results: u32) -> usize {
+    (results as usize).clamp(4, RESULTS_MAX)
 }
 
 /// A byte-order mark (older Notepad, Windows PowerShell) is not part of the settings.

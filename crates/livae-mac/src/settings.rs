@@ -29,6 +29,7 @@ const TITLEBAR: f64 = 44.0;
 /// Space a section header takes; larger than a row gap so sections read as groups.
 const SECTION: f64 = 40.0;
 const HISTORY: [usize; 4] = [100, 500, 1000, 5000];
+const RESULTS: [u32; 7] = [5, 6, 7, 8, 9, 10, 12];
 const BREAK_EVERY: [u32; 5] = [15, 20, 30, 45, 60];
 const BREAK_SECONDS: [u32; 4] = [20, 30, 60, 120];
 const JOURNAL_AT: [&str; 6] = ["18:00", "19:00", "20:00", "21:00", "22:00", "23:00"];
@@ -133,6 +134,14 @@ define_class!(
         #[unsafe(method(allowAccessibility:))]
         fn allow_accessibility(&self, _s: Option<&AnyObject>) {
             crate::access::request();
+        }
+
+        #[unsafe(method(resultsChanged:))]
+        fn results_changed(&self, sender: Option<&AnyObject>) {
+            if let Some(p) = sender.and_then(|s| s.downcast_ref::<NSPopUpButton>()) {
+                let i = p.indexOfSelectedItem().clamp(0, RESULTS.len() as isize - 1) as usize;
+                config::update(|s| s.results = RESULTS[i]);
+            }
         }
 
         #[unsafe(method(historyChanged:))]
@@ -495,7 +504,7 @@ fn build(mtm: MainThreadMarker) {
     let breaks_rows = 4.0 * ROW + (ROW - 16.0);
     let journal_rows = 2.0 * ROW + (ROW - 16.0);
     let general_rows = ROW + ROW + (ROW - 12.0);
-    let rows = 2.0 * ROW + ROW + (ROW + (ROW - 12.0) + ROW + ROW + ROW + (ROW - 16.0)) + (ROW + (ROW - 16.0) + (ROW - 12.0) + ROW) + breaks_rows + journal_rows + general_rows;
+    let rows = 2.0 * ROW + 2.0 * ROW + (ROW + (ROW - 12.0) + ROW + ROW + ROW + (ROW - 16.0)) + (ROW + (ROW - 16.0) + (ROW - 12.0) + ROW) + breaks_rows + journal_rows + general_rows;
     // The title starts below the traffic lights (TITLEBAR).
     let h = TITLEBAR + 28.0 + 7.0 * SECTION + rows + 16.0 + 18.0 + PAD;
     // Taller than the screen: the same content in a scroll view, the window as tall as fits.
@@ -584,6 +593,19 @@ fn build(mtm: MainThreadMarker) {
     let dark = text(mtm, "Dark", 14.0, tokens::color::dark::TEXT_SECONDARY);
     dark.setFrame(NSRect::new(NSPoint::new(W - PAD - 32.0, y + 14.0), NSSize::new(36.0, 16.0)));
     v.addSubview(&dark);
+    y -= ROW;
+    // How many results the search shows at once; the clipboard panel is the same size.
+    label_at("Results shown", y);
+    let results = NSPopUpButton::initWithFrame_pullsDown(NSPopUpButton::alloc(mtm), NSRect::ZERO, false);
+    for n in RESULTS {
+        results.addItemWithTitle(&NSString::from_str(&n.to_string()));
+    }
+    results.selectItemAtIndex(RESULTS.iter().position(|&n| n == s.results).unwrap_or(4) as isize);
+    unsafe {
+        results.setTarget(tgt);
+        results.setAction(Some(sel!(resultsChanged:)));
+    }
+    right(&results, 130.0, y, 28.0);
 
     section("Clipboard", &mut y);
     y -= ROW;
