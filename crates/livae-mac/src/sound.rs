@@ -67,6 +67,13 @@ impl Status {
     }
 }
 
+/// Each step of the equaliser's start, on stderr, when `LIVAE_SOUND_LOG` is set (for diagnosing a device).
+fn log(what: &str) {
+    if std::env::var_os("LIVAE_SOUND_LOG").is_some() {
+        eprintln!("sound: {what}");
+    }
+}
+
 // ---- Core Audio properties --------------------------------------------------------------------------------------
 
 fn address(selector: u32, scope: u32) -> AudioObjectPropertyAddress {
@@ -365,13 +372,17 @@ impl Engine {
         ]);
         let cf = unsafe { &*(Retained::as_ptr(&description) as *const CFDictionary) };
         check(unsafe { AudioHardwareCreateAggregateDevice(cf, NonNull::from(&mut e.aggregate)) }, "make the equaliser's device")?;
+        log(&format!("device {} for {}: inputs {:?} outputs {:?}", e.aggregate, device.name, ids(e.aggregate, kAudioDevicePropertyStreams, kAudioObjectPropertyScopeInput), ids(e.aggregate, kAudioDevicePropertyStreams, kAudioObjectPropertyScopeOutput)));
 
         e.rate = read::<f64>(e.aggregate, kAudioDevicePropertyNominalSampleRate, kAudioObjectPropertyScopeGlobal, None).filter(|r| *r > 0.0).ok_or("The output reports no sample rate")?;
         let rt = Box::new(Rt { chain: Chain::new(design, e.rate), handover: e.handover.clone(), calls: e.calls.clone() });
         e.rt = Box::into_raw(rt);
         check(unsafe { AudioDeviceCreateIOProcID(e.aggregate, Some(io), e.rt as *mut c_void, NonNull::from(&mut e.proc_id)) }, "start the equaliser")?;
-        e.inputs_off();
+        if std::env::var_os("LIVAE_SOUND_KEEP_INPUTS").is_none() {
+            e.inputs_off();
+        }
         check(unsafe { AudioDeviceStart(e.aggregate, e.proc_id) }, "start the equaliser")?;
+        log(&format!("started at {} Hz", e.rate));
         e.started = true;
 
         // A new sample rate (another app, or Bluetooth switching profiles) retunes the filters.
@@ -406,7 +417,8 @@ impl Engine {
             let at = ptr + 4 + 4 * i;
             buf[at..at + 4].copy_from_slice(&u32::from(i + 1 == count).to_ne_bytes());
         }
-        unsafe { AudioObjectSetPropertyData(self.aggregate, NonNull::from(&a), 0, std::ptr::null(), got, NonNull::new_unchecked(buf.as_mut_ptr() as *mut c_void)) };
+        let set = unsafe { AudioObjectSetPropertyData(self.aggregate, NonNull::from(&a), 0, std::ptr::null(), got, NonNull::new_unchecked(buf.as_mut_ptr() as *mut c_void)) };
+        log(&format!("{count} input streams, only the last on (status {set})"));
     }
 
     /// New filters (an edit, or a new sample rate), taken up by the audio thread on its next buffer.
@@ -646,23 +658,33 @@ fn ask(service: tcc::Service) {
     }
 }
 
-/// Three seconds after a start, Core Audio must be calling the equaliser; if not, stand down (the device plays
-/// the apps directly again) rather than leave it silent.
+/// Every 3 s while the equaliser runs: when the output is playing (some app is using it) but the equaliser got no
+/// audio since the last look, twice in a row, stand down (the device plays the apps directly again) rather than
+/// leave it silent. An idle output is not a failure: Core Audio runs the equaliser only while something plays.
 fn watch(device: AudioObjectID, calls: Arc<AtomicU64>) {
-    let _ = DispatchQueue::main().after(DispatchTime::NOW.time(3_000_000_000), move || {
-        if calls.load(Ordering::Relaxed) > 0 {
-            return;
-        }
-        STATE.with(|s| {
-            let mut s = s.borrow_mut();
-            if s.engine.as_ref().is_some_and(|e| e.device == device && Arc::ptr_eq(&e.calls, &calls)) {
+    fn look(device: AudioObjectID, calls: Arc<AtomicU64>, seen: u64, strikes: u32) {
+        let _ = DispatchQueue::main().after(DispatchTime::NOW.time(3_000_000_000), move || {
+            let ours = STATE.with(|s| s.borrow().engine.as_ref().is_some_and(|e| e.device == device && Arc::ptr_eq(&e.calls, &calls)));
+            if !ours {
+                return;
+            }
+            let now = calls.load(Ordering::Relaxed);
+            let playing = read::<u32>(device, kAudioDevicePropertyDeviceIsRunningSomewhere, kAudioObjectPropertyScopeGlobal, None).unwrap_or(0) != 0;
+            let strikes = if playing && now == seen { strikes + 1 } else { 0 };
+            log(&format!("watch: {now} callbacks, output playing {playing}, strikes {strikes}"));
+            if strikes < 2 {
+                return look(device, calls, now, strikes);
+            }
+            STATE.with(|s| {
+                let mut s = s.borrow_mut();
                 s.engine = None;
                 s.failed = Some(device);
                 s.status = Status::Failed("macOS did not start the equaliser on this output".into());
-            }
+            });
+            crate::settings::sound_changed();
         });
-        crate::settings::sound_changed();
-    });
+    }
+    look(device, calls, 0, 0);
 }
 
 /// Hear an edit at once (the Equaliser window), before it is saved: the running equaliser takes the new filters.

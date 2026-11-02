@@ -21,7 +21,9 @@ Written in Rust, native on macOS (Liquid Glass) and Windows 11, true black and q
 - **Sound**: list your outputs and microphones in order, and whenever a device comes or goes the first one connected
   is put in use. An equaliser per output (and one for every output): a 10-band EQ, AutoEq filters you can import, a
   boost and a limiter that keeps it from clipping, with the curve drawn live. On the Mac it runs inside Livae, with no
-  driver; on Windows it drives [Equalizer APO](https://sourceforge.net/projects/equalizerapo/), which you install once.
+  driver: macOS asks once to let Livae hear what apps play, and for an output that has a microphone (a headset, a
+  USB DAC) also for the microphone, which Livae keeps off. On Windows it drives
+  [Equalizer APO](https://sourceforge.net/projects/equalizerapo/), which you install once.
 - **Clipboard history** (Shift+Cmd+C, Win+Shift+V): text, links, colours, images and files in one list, opened at your
   text cursor. Pin what you keep; copies from password managers are never recorded.
 - **Breaks** (off until you turn them on): a calm full-screen pause with a quote, on a Stretchly-like schedule, that
