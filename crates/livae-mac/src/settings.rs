@@ -36,9 +36,10 @@ const SIDEBAR: f64 = 196.0;
 /// The content column: from after the sidebar to the window's edge, less the padding.
 const CX: f64 = SIDEBAR + PAD;
 const CW: f64 = W - CX - PAD;
-/// Every control ends on this edge; a second button sits one fixed button width further in.
+/// Every control ends on this edge; a second button sits one fixed button width further in. Every value control
+/// (a shortcut, a choice, a slider) has one width.
 const BUTTON_W: f64 = 104.0;
-const POPUP_W: f64 = 176.0;
+const VALUE_W: f64 = 220.0;
 /// The panes: id, title, SF Symbol.
 const PANES: [(&str, &str, &str); 7] = [
     ("general", "General", "gearshape"),
@@ -818,8 +819,8 @@ fn build(mtm: MainThreadMarker) {
     p.title("General");
     let launcher = button(&s.launcher, sel!(recordLauncher:));
     let clipboard = button(&s.clipboard, sel!(recordClipboard:));
-    p.row("Search shortcut", &[(&launcher, POPUP_W, 28.0)], None);
-    p.row("Clipboard shortcut", &[(&clipboard, POPUP_W, 28.0)], None);
+    p.row("Search shortcut", &[(&launcher, VALUE_W, 28.0)], None);
+    p.row("Clipboard shortcut", &[(&clipboard, VALUE_W, 28.0)], None);
     p.group();
     let login = switch(false, sel!(loginToggled:));
     p.row("Open at login", &[(&login, 40.0, 22.0)], None);
@@ -827,7 +828,7 @@ fn build(mtm: MainThreadMarker) {
     slider.setContinuous(true);
     let glass_help = help();
     glass_help.setStringValue(ns_string!("From clear to black, for the search and the clipboard"));
-    p.row("Glass", &[(&slider, POPUP_W, 24.0)], Some(&glass_help));
+    p.row("Glass", &[(&slider, VALUE_W, 24.0)], Some(&glass_help));
     p.group();
     let welcome = button("Welcome…", sel!(openWelcome:));
     p.row(concat!("Livae ", env!("CARGO_PKG_VERSION")), &[(&welcome, BUTTON_W, 28.0)], None);
@@ -840,7 +841,7 @@ fn build(mtm: MainThreadMarker) {
     let results = popup(RESULTS.iter().map(|n| n.to_string()).collect(), RESULTS.iter().position(|&n| n == s.results).unwrap_or(4), sel!(resultsChanged:));
     let results_help = help();
     results_help.setStringValue(ns_string!("The clipboard shows as many"));
-    p.row("Results shown", &[(&results, POPUP_W, 28.0)], Some(&results_help));
+    p.row("Results shown", &[(&results, VALUE_W, 28.0)], Some(&results_help));
     let recent = switch(s.recent_apps, sel!(recentToggled:));
     p.row("Show most used apps", &[(&recent, 40.0, 22.0)], None);
     p.group();
@@ -863,7 +864,7 @@ fn build(mtm: MainThreadMarker) {
     p.row("Paste into the app in front", &[(&paste, 40.0, 22.0), (&allow, BUTTON_W, 28.0)], Some(&paste_status));
     p.group();
     let keep = popup(HISTORY.iter().map(|n| format!("{n} items")).collect(), HISTORY.iter().position(|&n| n == s.history).unwrap_or(1), sel!(historyChanged:));
-    p.row("Keep", &[(&keep, POPUP_W, 28.0)], None);
+    p.row("Keep", &[(&keep, VALUE_W, 28.0)], None);
     let clear_btn = button("Clear…", sel!(clearHistory:));
     let history_count = help();
     p.row("History", &[(&clear_btn, BUTTON_W, 28.0)], Some(&history_count));
@@ -883,10 +884,10 @@ fn build(mtm: MainThreadMarker) {
     p.row("Break reminders", &[(&breaks_on, 40.0, 22.0)], Some(&breaks_status));
     p.group();
     let every = popup(BREAK_EVERY.iter().map(|m| format!("{m} min")).collect(), BREAK_EVERY.iter().position(|&m| m == s.breaks.mini_every_min).unwrap_or(1), sel!(breakEveryChanged:));
-    p.row("Every", &[(&every, POPUP_W, 28.0)], None);
+    p.row("Every", &[(&every, VALUE_W, 28.0)], None);
     let length_label = |sec: u32| if sec < 60 { format!("{sec} s") } else { format!("{} min", sec / 60) };
     let length = popup(BREAK_SECONDS.iter().map(|&sec| length_label(sec)).collect(), BREAK_SECONDS.iter().position(|&x| x == s.breaks.mini_seconds).unwrap_or(0), sel!(breakLengthChanged:));
-    p.row("Length", &[(&length, POPUP_W, 28.0)], None);
+    p.row("Length", &[(&length, VALUE_W, 28.0)], None);
     let weekends = switch(s.breaks.weekends_off, sel!(weekendsToggled:));
     p.row("Weekends off", &[(&weekends, 40.0, 22.0)], None);
     views.push(v);
@@ -900,7 +901,7 @@ fn build(mtm: MainThreadMarker) {
     p.row("Evening journal", &[(&journal_on, 40.0, 22.0)], Some(&journal_status));
     p.group();
     let at = popup(JOURNAL_AT.iter().map(|t| t.to_string()).collect(), JOURNAL_AT.iter().position(|&t| t == s.journal.at).unwrap_or(2), sel!(journalAtChanged:));
-    p.row("Ask at", &[(&at, POPUP_W, 28.0)], None);
+    p.row("Ask at", &[(&at, VALUE_W, 28.0)], None);
     views.push(v);
 
     // Sound: the devices kept in use, and the equaliser.
@@ -910,9 +911,9 @@ fn build(mtm: MainThreadMarker) {
     let outputs = pulldown(sel!(outputPicked:));
     let outputs_help = help();
     outputs_help.setStringValue(ns_string!("The first one connected is always used"));
-    p.row("Output", &[(&outputs, POPUP_W + 64.0, 28.0)], Some(&outputs_help));
+    p.row("Output", &[(&outputs, VALUE_W, 28.0)], Some(&outputs_help));
     let inputs = pulldown(sel!(inputPicked:));
-    p.row("Microphone", &[(&inputs, POPUP_W + 64.0, 28.0)], None);
+    p.row("Microphone", &[(&inputs, VALUE_W, 28.0)], None);
     p.group();
     let eq = switch(s.sound.eq, sel!(eqToggled:));
     let eq_edit = button("Edit…", sel!(editEq:));
