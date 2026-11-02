@@ -9,9 +9,10 @@
 //!
 //! Sizes are DIPs; each window's render target runs at the monitor's DPI.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::time::Instant;
 
 use windows::core::{w, Interface, PCWSTR};
 use windows::Win32::Foundation::{D2DERR_RECREATE_TARGET, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -24,7 +25,7 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT, D2D1_EXTEND_MODE_CLAMP, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_GAMMA_2_2,
     D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_PRESENT_OPTIONS_NONE, D2D1_RENDER_TARGET_PROPERTIES,
     D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES, D2D1_DASH_STYLE_CUSTOM, D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_TYPE_SOFTWARE,
-    ID2D1StrokeStyle,
+    ID2D1StrokeStyle, D2D1_LAYER_PARAMETERS,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteFactory5, IDWriteFontCollection, IDWriteFontCollection1, IDWriteTextFormat, IDWriteTextLayout,
@@ -52,6 +53,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows_numerics::{Matrix3x2, Vector2};
 
 use crate::shell::{self, Pixels};
+use crate::motion::{self, Frame, Pose, Progress};
 use livae_core::{blur, tokens};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -291,6 +293,9 @@ impl Gfx {
 /// One glass window and its Direct2D target; bitmaps (icons, thumbnails) belong to the target.
 pub struct Surface {
     pub hwnd: HWND,
+    motion: Rc<Cell<Progress>>,
+    motion_origin: (f32, f32),
+    motion_done: Cell<bool>,
     /// Hidden from the screen by DWM until its first frame is drawn, so Windows never shows the empty window
     /// (grey fill and a white frame) that appears for a moment between showing and painting.
     cloaked: bool,
@@ -325,7 +330,7 @@ impl Surface {
             let _ = DwmExtendFrameIntoClientArea(hwnd, &MARGINS { cxLeftWidth: -1, cxRightWidth: -1, cyTopHeight: -1, cyBottomHeight: -1 });
             // DWM applies the attributes on the next frame change.
             let _ = SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
-            Self { hwnd, cloaked: false, target: None, bitmaps: HashMap::new(), backdrop: None, software: false }
+            Self { hwnd, motion: Rc::new(Cell::new(Progress::default())), motion_origin: (0.0, 0.0), motion_done: Cell::new(true), cloaked: false, target: None, bitmaps: HashMap::new(), backdrop: None, software: false }
         }
     }
 
@@ -356,6 +361,63 @@ impl Surface {
 
     pub fn visible(&self) -> bool {
         unsafe { IsWindowVisible(self.hwnd).as_bool() }
+    }
+
+    pub fn showing(&self) -> bool {
+        self.visible() && self.motion.get().showing
+    }
+
+    pub fn moving(&self) -> bool {
+        !self.motion_done.get()
+    }
+
+    pub fn frame(&self) -> Frame {
+        self.motion.get().frame(Instant::now()).local(self.motion_origin)
+    }
+
+    pub fn enter(&mut self, pose: Pose, anchor: (f32, f32), ms: u64) {
+        let mut progress = self.motion.get();
+        progress.enter(Frame::pose(pose, anchor, motion::animations()), ms, self.visible(), Instant::now());
+        self.motion.set(progress);
+        self.cloak_until_drawn();
+        self.animate();
+    }
+
+    pub fn exit(&mut self, anchor: (f32, f32)) {
+        if !self.visible() {
+            return;
+        }
+        let mut progress = self.motion.get();
+        progress.exit(Frame::pose(Pose::Shrink, anchor, motion::animations()), Instant::now());
+        self.motion.set(progress);
+        self.animate();
+    }
+
+    fn animate(&self) {
+        self.motion_done.set(false);
+        unsafe { SetTimer(Some(self.hwnd), motion::FRAME_TIMER, 16, None); }
+    }
+
+    pub fn band_timer(&self, active: bool) {
+        unsafe {
+            if active && self.visible() {
+                SetTimer(Some(self.hwnd), motion::BAND_TIMER, 16, None);
+            } else {
+                let _ = KillTimer(Some(self.hwnd), motion::BAND_TIMER);
+            }
+        }
+    }
+
+    /// With the EDIT clipped away, DWM can composite the journal's painted frame too.
+    pub fn animate_controls(&mut self) {
+        if self.software {
+            self.software = false;
+            self.target = None;
+            unsafe {
+                let _ = DwmExtendFrameIntoClientArea(self.hwnd, &MARGINS { cxLeftWidth: -1, cxRightWidth: -1, cyTopHeight: -1, cyBottomHeight: -1 });
+            }
+        }
+        self.bitmaps.remove("note-motion");
     }
 
     /// Call right before showing a hidden window; `draw` lifts the cloak once the first frame is on it.
@@ -405,11 +467,31 @@ impl Surface {
             }
             t.SetDpi(96.0 * scale, 96.0 * scale);
             t.BeginDraw();
+            t.SetTransform(&Matrix3x2::identity());
             // Transparent clear lets the acrylic through; the owner paints the black gradient and the content.
             t.Clear(Some(&color(Rgba(0.0, 0.0, 0.0, 0.0))));
+            let mut progress = self.motion.get();
+            let now = Instant::now();
+            let frame = progress.draw_frame(now).local(self.motion_origin);
+            self.motion.set(progress);
+            let layer = frame.opacity < 1.0;
+            t.SetTransform(&Matrix3x2 { M11: frame.scale, M22: frame.scale, M31: frame.x, M32: frame.y, ..Matrix3x2::identity() });
+            if layer {
+                let params = D2D1_LAYER_PARAMETERS {
+                    contentBounds: rect(0.0, 0.0, size.width as f32 / scale, size.height as f32 / scale),
+                    maskTransform: Matrix3x2::identity(),
+                    opacity: frame.opacity,
+                    ..Default::default()
+                };
+                t.PushLayer(&params, None);
+            }
             let own = self.backdrop.clone();
             let mut canvas = Canvas { t: &t, w: size.width as f32 / scale, h: size.height as f32 / scale, scale, hwnd: self.hwnd, bitmaps: &mut self.bitmaps, own };
             f(&mut canvas);
+            if layer {
+                t.PopLayer();
+            }
+            t.SetTransform(&Matrix3x2::identity());
             if let Err(e) = t.EndDraw(None, None) && e.code() == D2DERR_RECREATE_TARGET {
                 // Device lost (driver update, GPU reset): rebuilt on the next paint.
                 self.target = None;
@@ -418,6 +500,15 @@ impl Surface {
                 return;
             }
             let _ = ValidateRect(Some(self.hwnd), None);
+            if !progress.active(now) {
+                self.motion_done.set(true);
+                let _ = KillTimer(Some(self.hwnd), motion::FRAME_TIMER);
+                if !self.motion.get().showing {
+                    let _ = KillTimer(Some(self.hwnd), motion::BAND_TIMER);
+                    let _ = ShowWindow(self.hwnd, SW_HIDE);
+                    self.backdrop = None;
+                }
+            }
         }
         if self.cloaked {
             self.set_cloak(false);
@@ -560,6 +651,17 @@ impl Canvas<'_> {
         }
         let Some(Some(bmp)) = self.bitmaps.get(key) else { return };
         unsafe { self.t.DrawBitmap(bmp, Some(&rect(0.0, 0.0, self.w, self.h)), opacity.clamp(0.0, 1.0), D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None) };
+    }
+
+    /// A native control captured once, painted with the rest of its parent's motion.
+    pub fn control(&mut self, p: &Pixels, x: f32, y: f32, w: f32, h: f32) {
+        if !self.bitmaps.contains_key("note-motion") {
+            let bitmap = self.bitmap_from(p, 96.0);
+            self.bitmaps.insert("note-motion".to_string(), bitmap);
+        }
+        if let Some(Some(bitmap)) = self.bitmaps.get("note-motion") {
+            unsafe { self.t.DrawBitmap(bitmap, Some(&rect(x, y, w, h)), 1.0, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None); }
+        }
     }
 
     /// This window's part of the blurred backdrop (its own, else the panels' shared one), stretched back up from
@@ -741,13 +843,17 @@ pub struct Panel {
     pub top: i32,
     /// The window that was in front before the panel opened; focus goes back there.
     pub prev: HWND,
+    pub pose: Pose,
+    pub anchor_bottom: bool,
 }
 
 impl Panel {
     pub fn new(field_part: isize, card_part: isize, width: f32, field_h: f32) -> Self {
         let capsule = Surface::new(field_part, None, true);
-        let card = Surface::new(card_part, Some(capsule.hwnd), false);
-        Self { capsule, card, width, field_h, card_h: 0.0, scale: 1.0, x: 0, top: 0, prev: HWND::default() }
+        let mut card = Surface::new(card_part, Some(capsule.hwnd), false);
+        card.motion = capsule.motion.clone();
+        card.motion_origin = (0.0, field_h + GAP);
+        Self { capsule, card, width, field_h, card_h: 0.0, scale: 1.0, x: 0, top: 0, prev: HWND::default(), pose: Pose::Drop, anchor_bottom: false }
     }
 
     pub fn px(&self, dip: f32) -> i32 {
@@ -756,6 +862,10 @@ impl Panel {
 
     pub fn visible(&self) -> bool {
         self.capsule.visible()
+    }
+
+    pub fn showing(&self) -> bool {
+        self.capsule.showing()
     }
 
     /// Height of capsule, gap and card in pixels for a card of `card_h` DIPs.
@@ -793,7 +903,8 @@ impl Panel {
             self.capsule.backdrop = b.clone();
             self.card.backdrop = b;
         }
-        self.capsule.cloak_until_drawn();
+        let anchor = (self.width / 2.0, if self.anchor_bottom { self.field_h + GAP + self.card_h } else { 0.0 });
+        self.capsule.enter(self.pose, anchor, tokens::motion::PANEL);
         unsafe {
             let flags = SWP_SHOWWINDOW | if activate { SET_WINDOW_POS_FLAGS(0) } else { SWP_NOACTIVATE };
             let _ = SetWindowPos(self.capsule.hwnd, Some(HWND_TOPMOST), self.x, self.top, w, self.px(self.field_h), flags);
@@ -821,9 +932,13 @@ impl Panel {
                 return;
             }
             let y = self.top + self.px(self.field_h + GAP);
+            self.card.motion_origin = (0.0, (y - self.top) as f32 / self.scale);
             let _ = SetWindowPos(self.card.hwnd, Some(HWND_TOPMOST), self.x, y, self.px(self.width), self.px(self.card_h), SWP_SHOWWINDOW | SWP_NOACTIVATE);
         }
         self.card.keep_lit();
+        if self.capsule.motion.get().active(Instant::now()) {
+            self.card.animate();
+        }
     }
 
     /// Hide both; with `restore`, first hand the focus back to the app that had it (while Windows still lets us).
@@ -835,11 +950,11 @@ impl Panel {
             if restore && self.capsule.hwnd == GetForegroundWindow() && IsWindow(Some(self.prev)).as_bool() {
                 let _ = SetForegroundWindow(self.prev);
             }
-            let _ = ShowWindow(self.card.hwnd, SW_HIDE);
-            let _ = ShowWindow(self.capsule.hwnd, SW_HIDE);
         }
-        self.capsule.backdrop = None;
-        self.card.backdrop = None;
+        self.capsule.exit((self.width / 2.0, if matches!(self.pose, Pose::Drop) { 0.0 } else { (self.field_h + GAP + self.card_h) / 2.0 }));
+        if self.card.visible() {
+            self.card.animate();
+        }
     }
 
     /// Window rectangles for `--dump`: "x y w h" in pixels, or "hidden".
@@ -956,9 +1071,21 @@ extern "system" fn panel_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
             WM_MOUSEACTIVATE if passive => return LRESULT(MA_NOACTIVATE as isize),
             // We size each window for its monitor when it opens.
             WM_DPICHANGED => return LRESULT(0),
-            WM_TIMER if part == HUD => {
+            WM_TIMER if matches!(wparam.0, motion::FRAME_TIMER | motion::BAND_TIMER) => {
+                if IsWindowVisible(hwnd).as_bool() {
+                    let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(hwnd), None, false);
+                } else {
+                    let _ = KillTimer(Some(hwnd), wparam.0);
+                }
+                return LRESULT(0);
+            }
+            WM_TIMER if part == HUD && wparam.0 == 1 => {
                 let _ = KillTimer(Some(hwnd), 1);
-                let _ = ShowWindow(hwnd, SW_HIDE);
+                HUD_STATE.with(|cell| {
+                    if let Ok(mut slot) = cell.try_borrow_mut() && let Some(hud) = slot.as_mut() {
+                        hud.surface.exit((hud.width / 2.0, 22.0));
+                    }
+                });
                 return LRESULT(0);
             }
             WM_PAINT if part == HUD => {
@@ -989,6 +1116,7 @@ struct Hud {
     surface: Surface,
     text: String,
     scale: f32,
+    width: f32,
 }
 
 thread_local! {
@@ -997,24 +1125,27 @@ thread_local! {
 
 /// Show `text` centred on `at` for a moment.
 pub fn toast(text: &str, at: POINT) {
-    if crate::config::offscreen() {
-        return;
-    }
     HUD_STATE.with(|cell| {
         let Ok(mut slot) = cell.try_borrow_mut() else { return };
-        let hud = slot.get_or_insert_with(|| Hud { surface: Surface::new(HUD, None, false), text: String::new(), scale: 1.0 });
+        let hud = slot.get_or_insert_with(|| Hud { surface: Surface::new(HUD, None, false), text: String::new(), scale: 1.0, width: 0.0 });
         let m = monitor_at(at);
         hud.scale = m.scale;
         hud.text = text.to_string();
         let fmt = gfx().format(Font::Sans, 16.0, windows::Win32::Graphics::DirectWrite::DWRITE_FONT_WEIGHT_NORMAL, false, false);
         let w_dip = gfx().width(text, &fmt) + 48.0;
+        hud.width = w_dip;
         let (w, h) = ((w_dip * m.scale).round() as i32, (44.0 * m.scale).round() as i32);
-        let x = fit(at.x - w / 2, m.work.left + 8, m.work.right - w - 8);
-        let y = fit(at.y - h / 2, m.work.top + 8, m.work.bottom - h - 8);
+        let (x, y) = if crate::config::offscreen() {
+            offscreen_origin()
+        } else {
+            (fit(at.x - w / 2, m.work.left + 8, m.work.right - w - 8), fit(at.y - h / 2, m.work.top + 8, m.work.bottom - h - 8))
+        };
+        hud.surface.enter(Pose::Pop, (w_dip / 2.0, 22.0), tokens::motion::POP);
         unsafe {
             let _ = SetWindowPos(hud.surface.hwnd, Some(HWND_TOPMOST), x, y, w, h, SWP_SHOWWINDOW | SWP_NOACTIVATE);
             hud.surface.keep_lit();
-            let _ = SetTimer(Some(hud.surface.hwnd), 1, 1300, None);
+            let hold = motion::duration(tokens::motion::POP).as_millis().saturating_add(1300).min(u32::MAX as u128) as u32;
+            let _ = SetTimer(Some(hud.surface.hwnd), 1, hold, None);
         }
         draw_hud(hud);
     });

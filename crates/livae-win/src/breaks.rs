@@ -280,14 +280,6 @@ fn notice(seconds: u32, long: bool) {
     let at = POINT { x: (m.work.left + m.work.right) / 2, y: m.work.top + ((16.0 + 22.0) * m.scale).round() as i32 };
     glass::toast(&format!("{} in {seconds} s", if long { "Long break" } else { "Break" }), at);
 }
-
-/// Windows' "Animation effects" setting; off means no fades.
-fn animations() -> bool {
-    let mut on = BOOL(1);
-    let ok = unsafe { SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, Some(&mut on as *mut BOOL as *mut c_void), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0)) };
-    ok.is_err() || on.as_bool()
-}
-
 struct Display {
     rect: RECT,
     scale: f32,
@@ -401,7 +393,7 @@ impl State {
 
     fn opacity(&self) -> f32 {
         let eased = |since: Instant, ms: f32| {
-            let p = (since.elapsed().as_secs_f32() * 1000.0 / ms).min(1.0);
+            let p = (since.elapsed().as_secs_f64() / crate::motion::duration(ms as u64).as_secs_f64()).min(1.0) as f32;
             1.0 - (1.0 - p).powi(3)
         };
         match self.fade {
@@ -564,7 +556,7 @@ fn show(b: Break) {
         screens.push(Screen { surface, scale: d.scale, before, words, words_h });
     }
     let first = screens.first().map(|s| s.surface.hwnd);
-    let fade = if animations() { Fade::In(Instant::now()) } else { Fade::Shown };
+    let fade = if crate::motion::animations() { Fade::In(Instant::now()) } else { Fade::Shown };
     with(|st| {
         st.screens = screens;
         st.shown = Some(b);
@@ -586,7 +578,7 @@ fn show(b: Break) {
 
 /// Fade out, handing the keyboard back to the app that had it.
 fn hide() {
-    let fade = animations();
+    let fade = crate::motion::animations();
     let restore = with(|st| {
         if st.screens.is_empty() {
             return None;
@@ -635,13 +627,13 @@ fn frame() {
         }
         let first = st.screens[0].surface.hwnd;
         match st.fade {
-            Fade::In(t) if t.elapsed().as_secs_f32() * 1000.0 >= FADE_IN_MS => {
+            Fade::In(t) if t.elapsed() >= crate::motion::duration(FADE_IN_MS as u64) => {
                 st.fade = Fade::Shown;
                 unsafe {
                     let _ = SetTimer(Some(first), FRAME_TIMER, 33, None);
                 }
             }
-            Fade::Out(t) if t.elapsed().as_secs_f32() * 1000.0 >= FADE_OUT_MS => return true,
+            Fade::Out(t) if t.elapsed() >= crate::motion::duration(FADE_OUT_MS as u64) => return true,
             _ => {}
         }
         for i in 0..st.screens.len() {

@@ -24,6 +24,8 @@ mod journal;
 #[cfg(windows)]
 mod launcher;
 #[cfg(windows)]
+mod motion;
+#[cfg(windows)]
 mod shell;
 #[cfg(windows)]
 mod system;

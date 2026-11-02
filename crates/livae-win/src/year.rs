@@ -74,6 +74,7 @@ struct Ui {
     work: RECT,
     prev: HWND,
     showing: bool,
+    card_day: Option<NaiveDate>,
 }
 thread_local! { static UI: RefCell<Option<Ui>> = const { RefCell::new(None) }; }
 static ORIGINAL: OnceLock<isize> = OnceLock::new();
@@ -339,8 +340,8 @@ fn draw_board(c: &mut Canvas, s: &State) {
         text(c, &value, 14.0, true, x + w - vw, y, vw, 20.0, if value.starts_with("0-") { TERTIARY } else { TEXT });
     }
 }
-fn draw_card(c: &mut Canvas, s: &State) {
-    let Some(d) = s.hover else { return };
+fn draw_card(c: &mut Canvas, s: &State, day: Option<NaiveDate>) {
+    let Some(d) = day else { return };
     c.glass(config::get().glass.max(0.85) as f32);
     let inner = CARD_W - 2.0 * CARD_X;
     text(c, &d.format("%a %d.%m.%Y").to_string(), 14.0, true, CARD_X, CARD_Y, inner, 20.0, TEXT);
@@ -397,21 +398,24 @@ impl Ui {
     }
     fn paint(&mut self) {
         self.board.draw(self.scale, |c| draw_board(c, &self.state));
-        self.card.draw(self.scale, |c| draw_card(c, &self.state));
+        self.card.draw(self.scale, |c| draw_card(c, &self.state, self.card_day));
     }
     fn place(&mut self) {
         unsafe {
             let _ = SetWindowPos(self.board.hwnd, None, 0, 0, self.px(W), self.px(height(&self.state)), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
         }
-        let Some(d) = self.state.hover else {
-            let _ = unsafe { ShowWindow(self.card.hwnd, SW_HIDE) };
+        let Some(d) = self.state.hover.filter(|_| self.showing) else {
+            if let Some(day) = self.card_day {
+                self.card.exit((CARD_W / 2.0, card_height(&self.state, day) / 2.0));
+            }
             return;
         };
+        self.card_day = Some(d);
         let h = self.px(card_height(&self.state, d));
         let x = glass::fit(self.x + self.px(cell(d).0 + CELL / 2.0 - CARD_W / 2.0), self.x, self.x + self.px(W - CARD_W));
         let above = self.y - 10 - h;
         let y = if above < self.work.top && !config::offscreen() { self.y + self.px(height(&self.state)) + 10 } else { above };
-        self.card.cloak_until_drawn();
+        self.card.enter(crate::motion::Pose::Rise, (CARD_W / 2.0, card_height(&self.state, d) / 2.0), livae_core::tokens::motion::PANEL);
         unsafe {
             let _ = SetWindowPos(self.card.hwnd, Some(HWND_TOPMOST), x, y, self.px(CARD_W), h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
         }
@@ -419,18 +423,16 @@ impl Ui {
     }
     fn hide(&mut self, restore: bool) {
         self.showing = false;
-        self.state.hover = None;
-        self.state.legend = None;
         unsafe {
             let _ = KillTimer(Some(self.board.hwnd), 1);
             if restore && GetForegroundWindow() == self.board.hwnd && IsWindow(Some(self.prev)).as_bool() {
                 let _ = SetForegroundWindow(self.prev);
             }
-            let _ = ShowWindow(self.card.hwnd, SW_HIDE);
-            let _ = ShowWindow(self.board.hwnd, SW_HIDE);
         }
-        self.card.backdrop = None;
-        self.board.backdrop = None;
+        if let Some(day) = self.card_day {
+            self.card.exit((CARD_W / 2.0, card_height(&self.state, day) / 2.0));
+        }
+        self.board.exit((W / 2.0, height(&self.state) / 2.0));
     }
     fn step(&mut self, by: i32) {
         let year = (self.state.year + by).min(self.state.today.year());
@@ -457,7 +459,7 @@ fn build() -> Ui {
         let style = GetWindowLongPtrW(card.hwnd, GWL_EXSTYLE);
         SetWindowLongPtrW(card.hwnd, GWL_EXSTYLE, style | WS_EX_TRANSPARENT.0 as isize);
     }
-    Ui { board, card, state: State::default(), scale: 1.0, x: 0, y: 0, work: RECT::default(), prev: HWND::default(), showing: false }
+    Ui { board, card, state: State::default(), scale: 1.0, x: 0, y: 0, work: RECT::default(), prev: HWND::default(), showing: false, card_day: None }
 }
 pub fn show() {
     let needs_build = UI.with(|u| u.borrow().is_none());
@@ -466,8 +468,16 @@ pub fn show() {
         UI.with(|u| *u.borrow_mut() = Some(built));
     }
     with(|u| {
-        if u.showing {
-            u.hide(false);
+        if u.board.visible() {
+            u.showing = true;
+            u.board.enter(crate::motion::Pose::Rise, (W / 2.0, height(&u.state) / 2.0), livae_core::tokens::motion::PANEL);
+            u.place();
+            u.paint();
+            unsafe { SetTimer(Some(u.board.hwnd), 1, 1000, None); }
+            if !config::offscreen() {
+                glass::bring_to_front(u.board.hwnd);
+            }
+            return;
         }
         load(&mut u.state, core::now().date().year());
         let monitor = glass::monitor_at(glass::cursor());
@@ -493,7 +503,7 @@ pub fn show() {
             u.board.backdrop = backdrop.clone();
             u.card.backdrop = backdrop;
         }
-        u.board.cloak_until_drawn();
+        u.board.enter(crate::motion::Pose::Rise, (W / 2.0, height(&u.state) / 2.0), livae_core::tokens::motion::PANEL);
         u.showing = true;
         unsafe {
             let flags = SWP_SHOWWINDOW | if config::offscreen() { SWP_NOACTIVATE } else { SET_WINDOW_POS_FLAGS(0) };
@@ -567,11 +577,14 @@ pub fn dump() -> String {
 }
 extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     let card = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } == CARD;
+    if matches!(msg, WM_MOUSEMOVE | WM_MOUSELEAVE | WM_LBUTTONDOWN | WM_KEYDOWN) && with(|u| !u.showing).unwrap_or(true) {
+        return LRESULT(0);
+    }
     match msg {
         WM_PAINT => {
             with(|u| {
                 if card {
-                    u.card.draw(u.scale, |c| draw_card(c, &u.state));
+                    u.card.draw(u.scale, |c| draw_card(c, &u.state, u.card_day));
                 } else {
                     u.board.draw(u.scale, |c| draw_board(c, &u.state));
                 }
@@ -642,7 +655,7 @@ extern "system" fn proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT
             });
             return LRESULT(0);
         }
-        WM_TIMER if !card => {
+        WM_TIMER if !card && wp.0 == 1 => {
             with(|u| {
                 let path = journal::file();
                 let stamp = std::fs::metadata(path).and_then(|m| m.modified()).ok();

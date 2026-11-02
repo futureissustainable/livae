@@ -21,9 +21,9 @@ use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows::Win32::Graphics::DirectWrite::{DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_WEIGHT_NORMAL};
 use windows::Win32::Graphics::Gdi::{
-    AddFontMemResourceEx, CreateCompatibleDC, CreateDIBSection, CreateFontW, DeleteDC, DeleteObject, DrawTextW, GetDC, GetStockObject, GetTextFaceW, InvalidateRect,
+    AddFontMemResourceEx, CreateCompatibleDC, CreateDIBSection, CreateFontW, DeleteDC, DeleteObject, DrawTextW, GdiFlush, GetDC, GetStockObject, GetTextFaceW, InvalidateRect,
     ReleaseDC, SelectObject, SetBkColor, SetBkMode, SetTextColor, AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
-    BLACK_BRUSH, BLENDFUNCTION, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH, DIB_RGB_COLORS, DT_NOPREFIX,
+    BLACK_BRUSH, BLENDFUNCTION, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateRectRgn, SetWindowRgn, DEFAULT_CHARSET, DEFAULT_PITCH, DIB_RGB_COLORS, DT_NOPREFIX,
     DT_WORDBREAK, FW_NORMAL, HDC, HFONT, HGDIOBJ, OUT_DEFAULT_PRECIS, TRANSPARENT,
 };
 use windows::Win32::System::Diagnostics::Debug::MessageBeep;
@@ -151,6 +151,8 @@ struct Layout {
 struct Ui {
     panel: Surface,
     note: HWND,
+    note_frame: Option<shell::Pixels>,
+    note_clipped: bool,
     font: HFONT,
     font_scale: f32,
     /// The click-through blur behind the panel while it shows.
@@ -327,19 +329,29 @@ extern "system" fn note_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARA
             let r = pass();
             unsafe {
                 if GetWindowTextLengthW(hwnd) == 0 {
-                    draw_placeholder(hwnd);
+                    let dc = GetDC(Some(hwnd));
+                    draw_placeholder(hwnd, dc);
+                    ReleaseDC(Some(hwnd), dc);
                 }
             }
             r
+        }
+        WM_PRINTCLIENT => {
+            let result = pass();
+            unsafe {
+                if GetWindowTextLengthW(hwnd) == 0 {
+                    draw_placeholder(hwnd, HDC(wparam.0 as _));
+                }
+            }
+            result
         }
         _ => pass(),
     }
 }
 
 /// "What did today teach you?" where the empty note's text starts.
-unsafe fn draw_placeholder(hwnd: HWND) {
+unsafe fn draw_placeholder(hwnd: HWND, dc: HDC) {
     unsafe {
-        let dc = GetDC(Some(hwnd));
         let font = SendMessageW(hwnd, WM_GETFONT, None, None);
         let old = SelectObject(dc, HGDIOBJ(font.0 as *mut _));
         SetTextColor(dc, colorref(tokens::color::dark::TEXT_TERTIARY));
@@ -351,7 +363,6 @@ unsafe fn draw_placeholder(hwnd: HWND) {
         DrawTextW(dc, &mut text, &mut r, DT_NOPREFIX | DT_WORDBREAK);
         let _ = ShowCaret(Some(hwnd));
         SelectObject(dc, old);
-        ReleaseDC(Some(hwnd), dc);
     }
 }
 
@@ -418,7 +429,7 @@ fn show_veil(r: RECT, backdrop: &glass::Backdrop) -> HWND {
             if !bits.is_null() {
                 std::ptr::copy_nonoverlapping(px.as_ptr(), bits as *mut u8, px.len());
                 let old = SelectObject(mem, dib.into());
-                let blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: 255, AlphaFormat: AC_SRC_ALPHA as u8 };
+                let blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: 0, AlphaFormat: AC_SRC_ALPHA as u8 };
                 let (at, size, from) = (POINT { x: r.left, y: r.top }, SIZE { cx: w, cy: h }, POINT { x: 0, y: 0 });
                 let _ = UpdateLayeredWindow(hwnd, Some(screen), Some(&at), Some(&size), Some(mem), Some(&from), COLORREF(0), Some(&blend), ULW_ALPHA);
                 SelectObject(mem, old);
@@ -429,6 +440,43 @@ fn show_veil(r: RECT, backdrop: &glass::Backdrop) -> HWND {
         ReleaseDC(None, screen);
         let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
         hwnd
+    }
+}
+
+/// WM_PRINTCLIENT keeps the native note's scroll, selection and font in the moving frame.
+fn note_frame(note: HWND) -> Option<shell::Pixels> {
+    unsafe {
+        let mut r = RECT::default();
+        GetClientRect(note, &mut r).ok()?;
+        let (w, h) = (r.right.max(1), r.bottom.max(1));
+        let dc = CreateCompatibleDC(None);
+        if dc.is_invalid() {
+            return None;
+        }
+        let info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER { biSize: size_of::<BITMAPINFOHEADER>() as u32, biWidth: w, biHeight: -h, biPlanes: 1, biBitCount: 32, biCompression: BI_RGB.0, ..Default::default() },
+            ..Default::default()
+        };
+        let mut bits = std::ptr::null_mut();
+        let mut result = None;
+        if let Ok(dib) = CreateDIBSection(Some(dc), &info, DIB_RGB_COLORS, &mut bits, None, 0) {
+            if !bits.is_null() {
+                let len = w as usize * h as usize * 4;
+                std::ptr::write_bytes(bits, 0, len);
+                let old = SelectObject(dc, dib.into());
+                SendMessageW(note, WM_PRINTCLIENT, Some(WPARAM(dc.0 as usize)), Some(LPARAM((PRF_CLIENT | PRF_ERASEBKGND) as isize)));
+                let _ = GdiFlush();
+                let mut data = std::slice::from_raw_parts(bits as *const u8, len).to_vec();
+                for pixel in data.as_chunks_mut::<4>().0 {
+                    pixel[3] = 255;
+                }
+                SelectObject(dc, old);
+                result = Some(shell::Pixels { w: w as u32, h: h as u32, data });
+            }
+            let _ = DeleteObject(dib.into());
+        }
+        let _ = DeleteDC(dc);
+        result
     }
 }
 
@@ -449,6 +497,8 @@ fn build() -> Ui {
     Ui {
         panel,
         note,
+        note_frame: None,
+        note_clipped: false,
         font: HFONT::default(),
         font_scale: 0.0,
         veil: HWND::default(),
@@ -473,6 +523,48 @@ fn build() -> Ui {
 }
 
 impl Ui {
+    fn freeze_note(&mut self) {
+        self.note_frame = note_frame(self.note);
+        if !self.note_clipped {
+            unsafe {
+                let region = CreateRectRgn(0, 0, 0, 0);
+                if SetWindowRgn(self.note, Some(region), false) == 0 {
+                    let _ = DeleteObject(region.into());
+                }
+            }
+            self.note_clipped = true;
+        }
+        self.panel.animate_controls();
+    }
+
+    fn finish_motion(&mut self) {
+        if !self.veil.is_invalid() {
+            let blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: (self.panel.frame().opacity * 255.0).round() as u8, AlphaFormat: AC_SRC_ALPHA as u8 };
+            unsafe {
+                let _ = UpdateLayeredWindow(self.veil, None, None, None, None, None, COLORREF(0), Some(&blend), ULW_ALPHA);
+            }
+        }
+        if !self.panel.moving() && self.note_clipped {
+            self.panel.host_controls();
+            unsafe {
+                SetWindowRgn(self.note, None, false);
+                let _ = InvalidateRect(Some(self.note), None, false);
+            }
+            self.note_clipped = false;
+            self.note_frame = None;
+            if self.showing {
+                self.paint();
+            } else {
+                unsafe {
+                    if !self.veil.is_invalid() {
+                        let _ = DestroyWindow(self.veil);
+                        self.veil = HWND::default();
+                    }
+                }
+            }
+        }
+    }
+
     fn px(&self, dip: f32) -> i32 {
         (dip * self.scale).round() as i32
     }
@@ -614,6 +706,9 @@ impl Ui {
         unsafe {
             let _ = MoveWindow(self.note, self.px(PAD_X), self.px(l.note_y), self.px(INNER), self.px(note_h), true);
         }
+        if self.note_clipped {
+            self.freeze_note();
+        }
         self.paint();
     }
 
@@ -642,6 +737,7 @@ impl Ui {
         let pill = g.format(Font::Sans, 13.0, DWRITE_FONT_WEIGHT_MEDIUM, false, false);
         let focus_ring = rgb(dark::FOCUS);
         let mut at = None;
+        let note_frame = self.note_frame.as_ref();
         self.panel.draw(self.scale, |c| {
             c.glass(dark_glass);
             let centred = |c: &mut glass::Canvas, text: &str, fmt, x: f32, y: f32, w: f32, h: f32, color| {
@@ -664,6 +760,10 @@ impl Ui {
             // The note's black page (the EDIT draws the text on it).
             let radius = tokens::radius::CONTROL as f32;
             c.round(PAD_X - PAGE_PAD, l.note_y - PAGE_PAD, INNER + 2.0 * PAGE_PAD, NOTE_H - l.lift + PAGE_PAD, radius, Rgba(0.0, 0.0, 0.0, 1.0));
+            if let Some(frame) = note_frame {
+                let h = NOTE_H - l.lift - PAGE_PAD;
+                c.control(frame, PAD_X, l.note_y, INNER, h);
+            }
 
             // The line under the note: what Save still needs, or a failed save with its mark.
             if notice != Notice::None {
@@ -745,10 +845,14 @@ impl Ui {
                 let _ = SetCaretPos(self.px(x), self.px(y));
             }
         }
+        self.finish_motion();
     }
 
     /// The counter, the placeholder, the live hint and Save; on every keystroke in the note.
     fn note_changed(&mut self) {
+        if self.note_clipped {
+            self.freeze_note();
+        }
         let empty = unsafe { GetWindowTextLengthW(self.note) } == 0;
         if empty != self.note_empty {
             self.note_empty = empty;
@@ -1007,6 +1111,20 @@ impl Ui {
     /// Show the panel (and the blur behind it) on the monitor with the pointer, the keyboard in the note.
     fn present(&mut self) {
         let offscreen = config::offscreen();
+        if self.panel.visible() {
+            self.showing = true;
+            self.panel.enter(crate::motion::Pose::Rise, (W / 2.0, self.h / 2.0), tokens::motion::PANEL);
+            self.paint();
+            if !offscreen {
+                glass::bring_to_front(self.panel.hwnd);
+                unsafe { let _ = SetFocus(Some(self.note)); }
+            }
+            if self.mode == Mode::Due {
+                let every = schedule().nag.num_milliseconds().clamp(60_000, u32::MAX as i64) as u32;
+                unsafe { SetTimer(Some(self.panel.hwnd), NAG_TIMER, every, None); }
+            }
+            return;
+        }
         let m = glass::monitor_at(glass::cursor());
         self.scale = m.scale;
         if self.font_scale != m.scale {
@@ -1038,7 +1156,14 @@ impl Ui {
             self.veil = show_veil(m.full, b);
         }
         self.panel.backdrop = backdrop;
-        self.panel.cloak_until_drawn();
+        self.place();
+        unsafe {
+            let end = GetWindowTextLengthW(self.note).max(0) as usize;
+            SendMessageW(self.note, EM_SETSEL, Some(WPARAM(end)), Some(LPARAM(end as isize)));
+            SendMessageW(self.note, EM_SCROLLCARET, None, None);
+        }
+        self.freeze_note();
+        self.panel.enter(crate::motion::Pose::Rise, (W / 2.0, l.h / 2.0), tokens::motion::PANEL);
         unsafe {
             let flags = SWP_SHOWWINDOW | if offscreen { SWP_NOACTIVATE } else { SET_WINDOW_POS_FLAGS(0) };
             let _ = SetWindowPos(self.panel.hwnd, Some(HWND_TOPMOST), x, y, w, h, flags);
@@ -1051,9 +1176,6 @@ impl Ui {
                 glass::bring_to_front(self.panel.hwnd);
                 let _ = SetFocus(Some(self.note));
             }
-            let end = GetWindowTextLengthW(self.note).max(0) as usize;
-            SendMessageW(self.note, EM_SETSEL, Some(WPARAM(end)), Some(LPARAM(end as isize)));
-            SendMessageW(self.note, EM_SCROLLCARET, None, None);
             if self.mode == Mode::Due {
                 let every = schedule().nag.num_milliseconds().clamp(60_000, u32::MAX as i64) as u32;
                 let _ = SetTimer(Some(self.panel.hwnd), NAG_TIMER, every, None);
@@ -1064,6 +1186,12 @@ impl Ui {
     }
 
     fn dismiss(&mut self) {
+        if !self.showing {
+            return;
+        }
+        if !self.note_clipped {
+            self.freeze_note();
+        }
         self.showing = false;
         if self.editing.take().is_some() {
             unsafe {
@@ -1076,13 +1204,9 @@ impl Ui {
             if GetForegroundWindow() == self.panel.hwnd && IsWindow(Some(self.prev)).as_bool() {
                 let _ = SetForegroundWindow(self.prev);
             }
-            let _ = ShowWindow(self.panel.hwnd, SW_HIDE);
-            if !self.veil.is_invalid() {
-                let _ = DestroyWindow(self.veil);
-                self.veil = HWND::default();
-            }
         }
-        self.panel.backdrop = None;
+        self.panel.exit((W / 2.0, self.h / 2.0));
+        self.paint();
     }
 
     fn handle(&mut self, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
@@ -1289,7 +1413,9 @@ fn open(mode: Mode) {
         }
     }
     with(|u| {
-        u.prepare(mode);
+        if !u.panel.visible() {
+            u.prepare(mode);
+        }
         u.present();
     });
 }

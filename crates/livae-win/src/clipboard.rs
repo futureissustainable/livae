@@ -314,6 +314,7 @@ fn caret_rect(front: HWND) -> Option<RECT> {
 
 pub struct Clipboard {
     panel: Panel,
+    band: crate::motion::Band,
     field: Field,
     history: History,
     /// Indices into the history matching the query, in display order.
@@ -341,8 +342,9 @@ pub fn install() {
     let _ = formats();
     let mut history = History::new(history::load(&store_file()));
     history.reclassify();
-    let c = Clipboard {
+    let mut c = Clipboard {
         panel: Panel::new(glass::CLIP_FIELD, glass::CLIP_CARD, WIDTH, FIELD_H),
+        band: crate::motion::Band::default(),
         field: Field::default(),
         history,
         shown: Vec::new(),
@@ -354,6 +356,7 @@ pub fn install() {
         high: None,
         mouse: POINT::default(),
     };
+    c.panel.pose = crate::motion::Pose::Clipboard;
     CLIPBOARD.with(|cell| *cell.borrow_mut() = Some(c));
     // Whatever is on the clipboard now is the first item.
     changed();
@@ -379,7 +382,7 @@ pub fn hide() {
 }
 
 pub fn toggle() {
-    let open = with(|c| c.panel.visible()).unwrap_or(false);
+    let open = with(|c| c.panel.showing()).unwrap_or(false);
     if open { with(|c| c.hide(true)); } else { show(); }
 }
 
@@ -615,6 +618,12 @@ impl Clipboard {
     }
 
     fn show(&mut self, prev: HWND) {
+        if self.panel.visible() && !self.panel.showing() {
+            self.panel.show(!config::offscreen());
+            self.paint_all();
+            return;
+        }
+        self.band.reset();
         if prev.is_invalid() {
             self.panel.remember_front(crate::launcher::front());
         } else {
@@ -651,6 +660,7 @@ impl Clipboard {
         let (gap, edge, total) = (p.px(gap), p.px(8.0), p.total_px(p.card_h));
         let x = glass::fit(anchor_x - p.px(TEXT_X), m.work.left + edge, m.work.right - p.px(WIDTH) - edge);
         let mut top = below + gap;
+        self.panel.anchor_bottom = top + total > m.work.bottom - edge;
         if top + total > m.work.bottom - edge {
             top = above - gap - total;
         }
@@ -666,6 +676,7 @@ impl Clipboard {
     }
 
     fn query_changed(&mut self) {
+        self.band.reset();
         self.selected = 0;
         self.first = 0;
         self.caret = true;
@@ -823,7 +834,7 @@ impl Clipboard {
         } else {
             format!("No copied item matches \u{201c}{}\u{201d}", self.field.text().trim())
         };
-        let rows: Vec<(f32, f32, Clip, bool)> = self
+        let rows: Vec<(f32, f32, Clip)> = self
             .slots
             .iter()
             .enumerate()
@@ -831,23 +842,26 @@ impl Clipboard {
                 let i = *self.shown.get(self.first + slot)?;
                 let c = self.history.clips.get(i)?;
                 let light = Clip { text: c.text.chars().take(600).collect(), image: c.image.clone(), app: String::new(), ..*c };
-                Some((y, h, light, self.first + slot == self.selected))
+                Some((y, h, light))
             })
             .collect();
         let texts: Vec<(String, String)> = rows.iter().map(|r| self.texts(&r.2)).collect();
         let (scale, dark) = (self.panel.scale, self.darkness() * 0.85);
+        let target = self.slots.get(self.selected.saturating_sub(self.first)).copied().unwrap_or((INSET, 44.0));
+        let ((band_y, band_h), moving) = self.band.at(target, self.first);
+        self.panel.card.band_timer(moving);
         self.panel.card.draw(scale, |cv| {
             cv.glass(dark);
+            if !rows.is_empty() {
+                cv.round(INSET, band_y, WIDTH - 2.0 * INSET, band_h, BAND_RADIUS, glass::white(BAND));
+            }
             if rows.is_empty() {
                 cv.text(&empty_msg, &body, TEXT_X, INSET, WIDTH - TEXT_X - EDGE, 44.0, TERTIARY);
                 return;
             }
-            for ((y, h, clip, on), (title, detail)) in rows.iter().zip(&texts) {
+            for ((y, h, clip), (title, detail)) in rows.iter().zip(&texts) {
                 let (y, h) = (*y, *h);
                 let mid = y + h / 2.0;
-                if *on {
-                    cv.round(INSET, y, WIDTH - 2.0 * INSET, h, BAND_RADIUS, glass::white(BAND));
-                }
                 // Age, quiet and right-aligned; the pin sits right before the age text.
                 let age = history::ago(now, clip.time);
                 cv.text(&age, &small_right, WIDTH - EDGE - TIME_W, y, TIME_W, h, TERTIARY);

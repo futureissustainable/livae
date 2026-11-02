@@ -111,6 +111,7 @@ pub struct Index {
 
 pub struct Launcher {
     panel: Panel,
+    band: crate::motion::Band,
     field: Field,
     scope: Scope,
     apps: Vec<App>,
@@ -159,6 +160,7 @@ pub fn install() {
     let names = apps.iter().map(|a| a.name.clone()).collect();
     let l = Launcher {
         panel: Panel::new(glass::LAUNCHER_FIELD, glass::LAUNCHER_CARD, WIDTH, FIELD_H),
+        band: crate::motion::Band::default(),
         field: Field::default(),
         scope: Scope::All,
         apps,
@@ -192,7 +194,7 @@ pub fn hide() {
 }
 
 pub fn toggle() {
-    let open = with(|l| l.panel.visible()).unwrap_or(false);
+    let open = with(|l| l.panel.showing()).unwrap_or(false);
     if open { with(|l| l.hide(true)); } else { show(); }
 }
 
@@ -407,6 +409,12 @@ fn file_icon(p: &Path, dir: bool) -> (String, String) {
 
 impl Launcher {
     fn show(&mut self) {
+        if self.panel.visible() && !self.panel.showing() {
+            self.panel.show(!config::offscreen());
+            self.paint_all();
+            return;
+        }
+        self.band.reset();
         self.panel.remember_front(crate::clipboard::front());
         self.field.clear();
         self.scope = Scope::All;
@@ -471,6 +479,7 @@ impl Launcher {
     }
 
     fn query_changed(&mut self) {
+        self.band.reset();
         self.selected = 0;
         self.caret = true;
         self.rebuild();
@@ -771,6 +780,7 @@ impl Launcher {
     fn paint_card(&mut self) {
         let n = self.rows();
         if n == 0 {
+            self.panel.card.band_timer(false);
             return;
         }
         let g = gfx();
@@ -821,12 +831,15 @@ impl Launcher {
         let right = WIDTH - EDGE - hint_w;
         let name_col = rows.iter().filter(|r| r.file).map(|r| g.width(&g.fit(&r.title, &body, 420.0, Trim::Middle), &body)).fold(0.0f32, f32::max);
         let (scale, dark) = (self.panel.scale, self.darkness() * 0.8);
+        let target = (INSET + self.selected.saturating_sub(self.first) as f32 * ROW_H, ROW_H);
+        let ((band_y, band_h), moving) = self.band.at(target, self.first);
+        self.panel.card.band_timer(moving);
         self.panel.card.draw(scale, |c| {
             c.glass(dark);
+            if rows.iter().any(|r| r.on) {
+                c.round(INSET, band_y, WIDTH - 2.0 * INSET, band_h, BAND_RADIUS, glass::white(BAND));
+            }
             for r in &rows {
-                if r.on {
-                    c.round(INSET, r.y, WIDTH - 2.0 * INSET, ROW_H, BAND_RADIUS, glass::white(BAND));
-                }
                 if let Some((key, source)) = &r.icon {
                     c.picture(key, source, EDGE + 3.0, r.y + (ROW_H - ICON) / 2.0, ICON, ICON, 0.0);
                 }
