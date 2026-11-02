@@ -8,11 +8,11 @@ use std::ptr::NonNull;
 use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2::{define_class, msg_send, sel, MainThreadOnly};
+use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
     NSAppearance, NSAppearanceCustomization, NSAppearanceNameDarkAqua, NSApplication, NSButton, NSColor, NSControlStateValueOff,
     NSControlStateValueOn, NSEvent, NSEventMask, NSEventModifierFlags, NSLineBreakMode, NSOpenPanel, NSPopUpButton, NSSlider, NSSwitch,
-    NSTextAlignment, NSTextField, NSView, NSWindow, NSWindowTitleVisibility,
+    NSAccessibility, NSResponder, NSTextField, NSView, NSWindow, NSWindowTitleVisibility,
 };
 use objc2::runtime::ProtocolObject;
 use objc2_app_kit::{NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSWindowDelegate};
@@ -85,8 +85,8 @@ struct Ui {
     eq: Retained<NSSwitch>,
     eq_status: Retained<NSTextField>,
     eq_allow: Retained<NSButton>,
-    /// Each pane's view and its sidebar button; the selection fill behind the chosen one.
-    panes: Vec<(Retained<NSView>, Retained<NSButton>)>,
+    /// Each pane's view and its sidebar row; the selection fill behind the chosen one.
+    panes: Vec<(Retained<NSView>, Retained<SidebarRow>)>,
     selection: Retained<NSView>,
     _target: Retained<Target>,
     _monitor: Option<Retained<AnyObject>>,
@@ -95,8 +95,50 @@ struct Ui {
 thread_local! {
     static UI: RefCell<Option<Ui>> = const { RefCell::new(None) };
     static RECORDING: Cell<Option<Recording>> = const { Cell::new(None) };
+    /// The pane on show, by index into `PANES`.
+    static PANE: Cell<usize> = const { Cell::new(0) };
     /// The device names behind the Output and Microphone menus' items, by tag.
     static CHOICES: RefCell<(Vec<String>, Vec<String>)> = const { RefCell::new((Vec::new(), Vec::new())) };
+}
+
+define_class!(
+    /// One pane in the sidebar: its symbol in a fixed column, its name on one left edge; a click shows the pane.
+    #[unsafe(super(NSView, NSResponder, NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "LivaeSettingsSidebarRow"]
+    #[ivars = Cell<usize>]
+    struct SidebarRow;
+
+    impl SidebarRow {
+        #[unsafe(method(acceptsFirstMouse:))]
+        fn accepts_first_mouse(&self, _event: Option<&NSEvent>) -> bool {
+            true
+        }
+
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, _event: &NSEvent) {
+            show_pane(PANES[self.ivars().get()].0);
+        }
+    }
+);
+
+impl SidebarRow {
+    fn new(mtm: MainThreadMarker, index: usize, frame: NSRect) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(Cell::new(index));
+        let row: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
+        let (_, title, symbol) = PANES[index];
+        let icon = objc2_app_kit::NSImageView::new(mtm);
+        icon.setImage(crate::ui::symbol(symbol).as_deref());
+        icon.setContentTintColor(Some(&rgb(tokens::color::dark::TEXT)));
+        icon.setFrame(NSRect::new(NSPoint::new(8.0, (frame.size.height - 20.0) / 2.0), NSSize::new(24.0, 20.0)));
+        row.addSubview(&icon);
+        let label = text(mtm, title, 16.0, tokens::color::dark::TEXT);
+        label.setFrame(NSRect::new(NSPoint::new(40.0, (frame.size.height - 22.0) / 2.0), NSSize::new(frame.size.width - 48.0, 22.0)));
+        row.addSubview(&label);
+        row.setAccessibilityRole(Some(unsafe { objc2_app_kit::NSAccessibilityButtonRole }));
+        row.setAccessibilityLabel(Some(&NSString::from_str(title)));
+        row
+    }
 }
 
 define_class!(
@@ -374,13 +416,6 @@ define_class!(
             }
         }
 
-        #[unsafe(method(paneChosen:))]
-        fn pane_chosen(&self, sender: Option<&AnyObject>) {
-            if let Some(b) = sender.and_then(|s| s.downcast_ref::<NSButton>()) {
-                show_pane(PANES.get(b.tag() as usize).map(|p| p.0).unwrap_or("general"));
-            }
-        }
-
         #[unsafe(method(openWelcome:))]
         fn open_welcome(&self, _s: Option<&AnyObject>) {
             crate::welcome::show();
@@ -558,11 +593,7 @@ pub fn refresh() {
         ignored.setStringValue(&NSString::from_str(&if names.is_empty() { "Nothing".to_string() } else { names.join(", ") }));
         home_only.setHidden(s.file_search == ["~"]);
         let open = crate::access::folders_allowed();
-        private_status.setStringValue(&NSString::from_str(if open {
-            "Desktop, Documents and Downloads included"
-        } else {
-            "Desktop, Documents and Downloads need your OK"
-        }));
+        private_status.setStringValue(&NSString::from_str(if open { "Searched" } else { "Not searched until you allow it" }));
         private_allow.setHidden(open);
         launcher.setTitle(&NSString::from_str(&crate::ui::shortcut_label(&s.launcher)));
         clipboard.setTitle(&NSString::from_str(&crate::ui::shortcut_label(&s.clipboard)));
@@ -570,7 +601,7 @@ pub fn refresh() {
         let status = if !s.paste {
             "Off: the item is copied, you press ⌘V"
         } else if trusted {
-            "On: pastes straight into the app in front"
+            "Choosing an item types it where you were writing"
         } else {
             "Needs Accessibility permission to paste"
         };
@@ -583,7 +614,7 @@ pub fn refresh() {
             sw.setState(if s.expansion { NSControlStateValueOn } else { NSControlStateValueOff });
             let first = s.snippets.first().map(|x| format!(", e.g. {}", x.trigger)).unwrap_or_default();
             let line = if !s.expansion {
-                "Snippets, quicklinks and command shortcuts are in the file".to_string()
+                format!("Off: triggers like {} stay as typed", s.snippets.first().map(|x| x.trigger.as_str()).unwrap_or(":date"))
             } else if crate::access::trusted() {
                 format!("On: {} snippets{first}", s.snippets.len())
             } else {
@@ -617,6 +648,7 @@ pub fn show_pane(pane: &str) {
         refresh();
     }
     let chosen = PANES.iter().position(|p| p.0 == pane).unwrap_or(0);
+    PANE.with(|p| p.set(chosen));
     UI.with(|u| {
         if let Some(ui) = u.borrow().as_ref() {
             for (i, (view, button)) in ui.panes.iter().enumerate() {
@@ -725,7 +757,8 @@ fn build(mtm: MainThreadMarker) {
     window.setContentView(Some(&glass.root));
     let root: &NSView = &glass.content;
 
-    // The sidebar: one row per pane, its symbol and name; the chosen one sits on a quiet fill.
+    // The sidebar: one row per pane, its symbol and name; the chosen one sits on a quiet fill. Arrow keys and
+    // Cmd+1 to 7 move between panes too.
     let selection = NSView::initWithFrame(NSView::alloc(mtm), NSRect::ZERO);
     selection.setWantsLayer(true);
     if let Some(layer) = selection.layer() {
@@ -734,19 +767,11 @@ fn build(mtm: MainThreadMarker) {
     }
     root.addSubview(&selection);
     let mut buttons = Vec::new();
-    for (i, (_, title, symbol)) in PANES.iter().enumerate() {
-        let b = unsafe { NSButton::buttonWithTitle_target_action(&NSString::from_str(title), tgt, Some(sel!(paneChosen:)), mtm) };
-        b.setBordered(false);
-        b.setImage(crate::ui::symbol(symbol).as_deref());
-        b.setImagePosition(objc2_app_kit::NSCellImagePosition::ImageLeading);
-        b.setImageHugsTitle(true);
-        b.setAlignment(NSTextAlignment::Left);
-        b.setContentTintColor(Some(&rgb(tokens::color::dark::TEXT)));
-        b.setFont(Some(&crate::font::regular(16.0)));
-        b.setTag(i as isize);
-        b.setFrame(NSRect::new(NSPoint::new(12.0, H - TITLEBAR - 8.0 - (i as f64 + 1.0) * 36.0 + 4.0), NSSize::new(SIDEBAR - 24.0, 32.0)));
-        root.addSubview(&b);
-        buttons.push(b);
+    for i in 0..PANES.len() {
+        let frame = NSRect::new(NSPoint::new(12.0, H - TITLEBAR - 8.0 - (i as f64 + 1.0) * 36.0 + 4.0), NSSize::new(SIDEBAR - 24.0, 32.0));
+        let row = SidebarRow::new(mtm, i, frame);
+        root.addSubview(&row);
+        buttons.push(row);
     }
 
     let switch = |on: bool, action: objc2::runtime::Sel| {
@@ -838,9 +863,10 @@ fn build(mtm: MainThreadMarker) {
     p.row("Paste into the app in front", &[(&paste, 40.0, 22.0), (&allow, BUTTON_W, 28.0)], Some(&paste_status));
     p.group();
     let keep = popup(HISTORY.iter().map(|n| format!("{n} items")).collect(), HISTORY.iter().position(|&n| n == s.history).unwrap_or(1), sel!(historyChanged:));
+    p.row("Keep", &[(&keep, POPUP_W, 28.0)], None);
     let clear_btn = button("Clear…", sel!(clearHistory:));
     let history_count = help();
-    p.row("Keep", &[(&keep, POPUP_W, 28.0), (&clear_btn, BUTTON_W, 28.0)], Some(&history_count));
+    p.row("History", &[(&clear_btn, BUTTON_W, 28.0)], Some(&history_count));
     p.group();
     let ignore_add = button("Add…", sel!(addIgnored:));
     let ignore_reset = button("Reset", sel!(resetIgnored:));
@@ -913,7 +939,25 @@ fn build(mtm: MainThreadMarker) {
     let handler = RcBlock::new(|event: NonNull<NSEvent>| -> *mut NSEvent {
         let ev = unsafe { event.as_ref() };
         let ours = UI.with(|u| u.borrow().as_ref().is_some_and(|ui| ev.window(MainThreadMarker::new().unwrap()).is_some_and(|w| std::ptr::eq(&*w, &*ui.window))));
-        if RECORDING.with(|r| r.get()).is_none() || !ours {
+        if !ours {
+            return event.as_ptr();
+        }
+        if RECORDING.with(|r| r.get()).is_none() {
+            // Up and down move between panes (unless a text box has the keyboard), Cmd+1 to 7 jump to one.
+            let typing = ev.window(MainThreadMarker::new().unwrap()).and_then(|w| w.firstResponder()).is_some_and(|r| r.isKindOfClass(<objc2_app_kit::NSTextView as objc2::ClassType>::class()));
+            let now = PANE.with(|p| p.get());
+            let cmd = ev.modifierFlags().contains(NSEventModifierFlags::Command);
+            let digit = ev.charactersIgnoringModifiers().map(|c| c.to_string()).and_then(|c| c.parse::<usize>().ok());
+            let next = match ev.keyCode() {
+                125 if !typing && !cmd => Some((now + 1).min(PANES.len() - 1)),
+                126 if !typing && !cmd => Some(now.saturating_sub(1)),
+                _ if cmd => digit.filter(|d| (1..=PANES.len()).contains(d)).map(|d| d - 1),
+                _ => None,
+            };
+            if let Some(i) = next {
+                show_pane(PANES[i].0);
+                return std::ptr::null_mut();
+            }
             return event.as_ptr();
         }
         if ev.keyCode() == 53 {
