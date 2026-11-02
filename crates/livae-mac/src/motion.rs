@@ -43,16 +43,6 @@ pub struct Parts {
     pub rows: Vec<Vec<Retained<NSView>>>,
 }
 
-/// How far the panel falls onto its place: the search `DROP_Y`, the clipboard at the text cursor `CLIP_DROP_Y`.
-/// (Glass cannot grow, so on the Mac the clipboard does not start at `CARET_SCALE`.)
-#[derive(Clone, Copy)]
-pub struct From {
-    pub drop: f64,
-}
-
-pub const SEARCH: From = From { drop: m::DROP_Y };
-pub const CLIPBOARD: From = From { drop: m::CLIP_DROP_Y };
-
 /// On screen and not leaving: what a toggle should treat as open.
 pub fn shown(window: &NSWindow) -> bool {
     window.isVisible() && window.alphaValue() > 0.0
@@ -397,8 +387,9 @@ pub fn hide_then(window: &NSWindow, kind: Kind, done: impl Fn() + 'static) {
 }
 
 /// The search or the clipboard dropping into focus: the panel falls onto its place on a spring, each row falls in
-/// `STAGGER_MS` after the one above, and the contents sharpen. The caller has placed and ordered it front.
-pub fn drop_in(window: &NSWindow, parts: &Parts, from: From) {
+/// `STAGGER_MS` after the one above, and the contents sharpen. `drop` is how far it falls (`DROP_Y`, the clipboard
+/// `CLIP_DROP_Y`). The caller has placed and ordered it front.
+pub fn drop_in(window: &NSWindow, parts: &Parts, drop: f64) {
     window.setIgnoresMouseEvents(false);
     let fresh = !leaving(window);
     if fresh {
@@ -406,15 +397,14 @@ pub fn drop_in(window: &NSWindow, parts: &Parts, from: From) {
     }
     let insides = [inside(&parts.capsule), inside(&parts.card)];
     if !reduce() {
-        move_window(window, if fresh { from.drop } else { lifted(window).unwrap_or(0.0) }, 0.0, How::Spring(m::DROP));
+        move_window(window, if fresh { drop } else { lifted(window).unwrap_or(0.0) }, 0.0, How::Spring(m::DROP));
         for v in &insides {
             let start = if fresh { m::FOCUS_BLUR } else { blur_now(v) };
             blur(v, start, 0.0, m::FOCUS_MS, m::EASE_FOCUS);
         }
         if fresh {
-            let stagger = secs(m::STAGGER_MS);
             for (i, row) in parts.rows.iter().enumerate() {
-                let delay = (4 + i) as f64 * stagger;
+                let delay = m::row_delay(i) * slow();
                 for v in row {
                     v.setWantsLayer(true);
                     spring_to(v, CATransform3D::new_translation(0.0, m::ROW_DROP, 0.0), identity(), m::ROW, delay);

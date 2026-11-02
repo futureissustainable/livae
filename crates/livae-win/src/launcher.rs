@@ -776,6 +776,7 @@ impl Launcher {
         let enter = (!self.field.text().trim().is_empty()).then(|| self.enter_hint()).flatten();
         let field = &self.field;
         let mut at = None;
+        self.panel.follow();
         self.panel.capsule.draw(scale, |c| {
             c.glass(dark);
             if let Some(icon) = icon {

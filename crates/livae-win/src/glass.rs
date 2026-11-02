@@ -17,7 +17,7 @@ use std::time::Instant;
 use windows::core::{w, Interface, PCWSTR};
 use windows::Win32::Foundation::{D2DERR_RECREATE_TARGET, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COMPOSITE_MODE_SOURCE_OVER, D2D1_COLOR_F, D2D1_GRADIENT_STOP, D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_U,
+    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_BORDER_MODE_HARD, D2D1_COMPOSITE_MODE_SOURCE_OVER, D2D1_COLOR_F, D2D1_GRADIENT_STOP, D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_U,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, ID2D1Bitmap, ID2D1Factory, ID2D1HwndRenderTarget, ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
@@ -26,7 +26,7 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_PRESENT_OPTIONS_NONE, D2D1_RENDER_TARGET_PROPERTIES,
     D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES, D2D1_DASH_STYLE_CUSTOM, D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_TYPE_SOFTWARE,
     ID2D1StrokeStyle, D2D1_LAYER_PARAMETERS, ID2D1DeviceContext, ID2D1Effect, ID2D1CommandList, ID2D1Image,
-    CLSID_D2D1GaussianBlur, D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION, D2D1_PROPERTY_TYPE_FLOAT, D2D1_INTERPOLATION_MODE_LINEAR,
+    CLSID_D2D1GaussianBlur, D2D1_GAUSSIANBLUR_PROP_BORDER_MODE, D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION, D2D1_PROPERTY_TYPE_ENUM, D2D1_PROPERTY_TYPE_FLOAT, D2D1_INTERPOLATION_MODE_LINEAR,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteFactory5, IDWriteFontCollection, IDWriteFontCollection1, IDWriteTextFormat, IDWriteTextLayout,
@@ -315,6 +315,8 @@ impl FocusBlur {
     fn new(t: &ID2D1HwndRenderTarget) -> Option<Self> {
         let context: ID2D1DeviceContext = t.cast().ok()?;
         let effect = unsafe { context.CreateEffect(&CLSID_D2D1GaussianBlur).ok()? };
+        // Hard edges: the blur stays inside the window, never fading its rim into the system backdrop.
+        unsafe { effect.SetValue(D2D1_GAUSSIANBLUR_PROP_BORDER_MODE.0 as u32, D2D1_PROPERTY_TYPE_ENUM, &(D2D1_BORDER_MODE_HARD.0 as u32).to_ne_bytes()).ok()? };
         Some(Self { context, effect })
     }
 
@@ -330,17 +332,16 @@ impl FocusBlur {
         }
     }
 
-    #[allow(clippy::too_many_arguments)] // the frame's target, DPI, transform, opacity and bounds
-    fn finish(&self, recording: Recording, t: &ID2D1HwndRenderTarget, scale: f32, matrix: Matrix3x2, opacity: f32, size: (f32, f32)) {
+    fn finish(&self, recording: Recording, t: &ID2D1HwndRenderTarget, scale: f32, opacity: f32, size: (f32, f32)) {
         unsafe {
             self.context.SetTarget(&recording.target);
             self.context.SetDpi(96.0 * scale, 96.0 * scale);
-            t.SetTransform(&matrix);
+            t.SetTransform(&Matrix3x2::identity());
             if recording.commands.Close().is_ok() {
                 self.effect.SetInput(0, &recording.commands, true);
                 push_opacity(t, size.0, size.1, opacity);
-                let pixels = Matrix3x2 { M11: matrix.M11 / scale, M22: matrix.M22 / scale, ..matrix };
-                t.SetTransform(&pixels);
+                // The recording is in pixels.
+                t.SetTransform(&Matrix3x2::scale(1.0 / scale, 1.0 / scale));
                 if let Ok(output) = self.effect.GetOutput() {
                     self.context.DrawImage(&output, None, None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER);
                 }
@@ -438,20 +439,20 @@ impl Surface {
         self.motion.get().frame(Instant::now())
     }
 
-    pub fn enter(&mut self, family: Family, anchor: (f32, f32)) {
+    pub fn enter(&mut self, family: Family) {
         let mut progress = self.motion.get();
-        progress.enter(family, anchor, motion::animations(), self.visible(), Instant::now());
+        progress.enter(family, motion::animations(), self.visible(), Instant::now());
         self.motion.set(progress);
         self.cloak_until_drawn();
         self.animate();
     }
 
-    pub fn exit(&mut self, anchor: (f32, f32)) {
+    pub fn exit(&mut self) {
         if !self.visible() {
             return;
         }
         let mut progress = self.motion.get();
-        progress.exit(anchor, Instant::now());
+        progress.exit(Instant::now());
         self.motion.set(progress);
         self.animate();
     }
@@ -544,20 +545,20 @@ impl Surface {
             let now = Instant::now();
             let frame = progress.draw_frame(now);
             self.motion.set(progress);
-            let matrix = Matrix3x2 { M11: frame.sx, M22: frame.sy, M31: frame.x, M32: frame.y, ..Matrix3x2::identity() };
+            let (w, h) = (size.width as f32 / scale, size.height as f32 / scale);
             let recording = if frame.blur > 0.0 { self.blur.as_ref().and_then(|b| b.begin(scale, frame.blur)) } else { None };
+            // The glass is drawn at `base` (pixels while recording for the blur); the contents grow around the centre.
+            let base = if recording.is_some() { Matrix3x2::scale(scale, scale) } else { Matrix3x2::identity() };
             if recording.is_none() {
-                t.SetTransform(&matrix);
-                push_opacity(&t, size.width as f32 / scale, size.height as f32 / scale, frame.opacity);
+                push_opacity(&t, w, h, frame.opacity);
             }
+            let s = frame.scale;
+            t.SetTransform(&Matrix3x2 { M11: base.M11 * s, M22: base.M22 * s, M31: base.M11 * w / 2.0 * (1.0 - s), M32: base.M22 * h / 2.0 * (1.0 - s), ..base });
             let own = self.backdrop.clone();
-            let mut canvas = Canvas {
-                t: &t, w: size.width as f32 / scale, h: size.height as f32 / scale, scale,
-                hwnd: self.hwnd, bitmaps: &mut self.bitmaps, own, progress, now,
-            };
+            let mut canvas = Canvas { t: &t, w, h, scale, base, hwnd: self.hwnd, bitmaps: &mut self.bitmaps, own, progress, now };
             f(&mut canvas);
             if let Some(recording) = recording {
-                self.blur.as_ref().unwrap().finish(recording, &t, scale, matrix, frame.opacity, (canvas.w, canvas.h));
+                self.blur.as_ref().unwrap().finish(recording, &t, scale, frame.opacity, (w, h));
             } else if frame.opacity < 1.0 {
                 t.PopLayer();
             }
@@ -592,6 +593,8 @@ pub struct Canvas<'a> {
     pub w: f32,
     pub h: f32,
     pub scale: f32,
+    /// The whole window's transform: the glass stays at it while the contents grow (a bloom).
+    base: Matrix3x2,
     hwnd: HWND,
     bitmaps: &'a mut HashMap<String, Option<ID2D1Bitmap>>,
     own: Option<Rc<Backdrop>>,
@@ -628,8 +631,14 @@ impl Canvas<'_> {
     }
 
     /// The panel's own blur of what is behind it (when it has one), then the black gradient: 0 clear … 1 black
-    /// at the top fading to a dark veil at the bottom (the Mac's 92% to 45%).
+    /// at the top fading to a dark veil at the bottom (the Mac's 92% to 45%). It covers the whole window and never
+    /// moves with the contents.
     pub fn glass(&mut self, darkness: f32) {
+        let mut contents = Matrix3x2::identity();
+        unsafe {
+            self.t.GetTransform(&mut contents);
+            self.t.SetTransform(&self.base);
+        }
         self.backdrop();
         let d = darkness.clamp(0.0, 1.0);
         unsafe {
@@ -637,11 +646,13 @@ impl Canvas<'_> {
                 D2D1_GRADIENT_STOP { position: 0.0, color: color(Rgba(0.0, 0.0, 0.0, 0.92 * d)) },
                 D2D1_GRADIENT_STOP { position: 1.0, color: color(Rgba(0.0, 0.0, 0.0, 0.45 * d)) },
             ];
-            let Ok(coll) = self.t.CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP) else { return };
             let props = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES { startPoint: Vector2::new(0.0, 0.0), endPoint: Vector2::new(0.0, self.h) };
-            if let Ok(b) = self.t.CreateLinearGradientBrush(&props, None, &coll) {
+            if let Ok(coll) = self.t.CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP)
+                && let Ok(b) = self.t.CreateLinearGradientBrush(&props, None, &coll)
+            {
                 self.t.FillRectangle(&rect(0.0, 0.0, self.w, self.h), &b);
             }
+            self.t.SetTransform(&contents);
         }
     }
 
@@ -948,15 +959,13 @@ pub struct Panel {
     /// The window that was in front before the panel opened; focus goes back there.
     pub prev: HWND,
     pub family: Family,
-    pub anchor_bottom: bool,
-    pub anchor_x: f32,
 }
 
 impl Panel {
     pub fn new(field_part: isize, card_part: isize, width: f32, field_h: f32) -> Self {
         let capsule = Surface::new(field_part, None, true);
         let card = Surface::new(card_part, Some(capsule.hwnd), false);
-        Self { capsule, card, width, field_h, card_h: 0.0, scale: 1.0, x: 0, top: 0, prev: HWND::default(), family: Family::Drop, anchor_bottom: false, anchor_x: 0.0 }
+        Self { capsule, card, width, field_h, card_h: 0.0, scale: 1.0, x: 0, top: 0, prev: HWND::default(), family: Family::Drop }
     }
 
     pub fn px(&self, dip: f32) -> i32 {
@@ -996,24 +1005,22 @@ impl Panel {
         }
     }
 
-    /// Put both windows at (x, top) and show them; with `activate`, take the keyboard focus.
+    /// Show both windows at (x, top), falling onto it; with `activate`, take the keyboard focus.
     pub fn show(&mut self, activate: bool) {
         let w = self.px(self.width);
         if !self.visible() {
-            // Room for the tallest card; captured before our windows are on screen, so they are not in it.
-            // Each panel owns its copy: opening one panel hides the other, which must not clear the new one's.
-            let b = capture_backdrop(self.x, self.top, w, self.px(self.field_h + GAP + 600.0), self.scale);
+            // Room for the tallest card and the fall; captured before our windows are on screen, so they are not in
+            // it. Each panel owns its copy: opening one panel hides the other, which must not clear the new one's.
+            let fall = self.px(livae_core::motion::DROP_Y.max(livae_core::motion::EXIT_LIFT) as f32);
+            let b = capture_backdrop(self.x, self.top - fall, w, fall + self.px(self.field_h + GAP + 600.0), self.scale);
             self.capsule.backdrop = b.clone();
             self.card.backdrop = b;
         }
-        let anchor = if self.family == Family::Clipboard {
-            (self.anchor_x, if self.anchor_bottom { self.field_h + GAP + self.card_h } else { 0.0 })
-        } else { (self.width / 2.0, 0.0) };
-        self.capsule.enter(self.family, anchor);
-        self.card.enter(Family::Card, (self.width / 2.0, 0.0));
+        self.capsule.enter(self.family);
+        self.card.enter(Family::Card);
         unsafe {
             let flags = SWP_SHOWWINDOW | if activate { SET_WINDOW_POS_FLAGS(0) } else { SWP_NOACTIVATE };
-            let _ = SetWindowPos(self.capsule.hwnd, Some(HWND_TOPMOST), self.x, self.top, w, self.px(self.field_h), flags);
+            let _ = SetWindowPos(self.capsule.hwnd, Some(HWND_TOPMOST), self.x, self.fallen(0.0), w, self.px(self.field_h), flags);
         }
         self.place_card();
         if activate {
@@ -1030,6 +1037,27 @@ impl Panel {
         }
     }
 
+    /// Screen y in pixels of a point `dip` below the panel's place, wherever its fall has it now.
+    fn fallen(&self, dip: f32) -> i32 {
+        self.top + self.px(self.capsule.frame().y + dip)
+    }
+
+    /// Move both windows with the panel's fall (the capsule's `Frame::y`) and repaint their backdrops at the new
+    /// place; the capsule calls it as it paints. As on the Mac, the glass moves with its window, so no edge of the
+    /// system backdrop ever shows.
+    pub fn follow(&self) {
+        let flags = SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE;
+        for (s, below) in [(&self.capsule, 0.0), (&self.card, self.field_h + GAP)] {
+            let (y, mut r) = (self.fallen(below), RECT::default());
+            unsafe {
+                if s.visible() && GetWindowRect(s.hwnd, &mut r).is_ok() && r.top != y {
+                    let _ = SetWindowPos(s.hwnd, None, self.x, y, 0, 0, flags);
+                    let _ = windows::Win32::Graphics::Gdi::InvalidateRect(Some(s.hwnd), None, false);
+                }
+            }
+        }
+    }
+
     fn place_card(&mut self) {
         self.card.cloak_until_drawn();
         unsafe {
@@ -1037,7 +1065,7 @@ impl Panel {
                 let _ = ShowWindow(self.card.hwnd, SW_HIDE);
                 return;
             }
-            let y = self.top + self.px(self.field_h + GAP);
+            let y = self.fallen(self.field_h + GAP);
             let _ = SetWindowPos(self.card.hwnd, Some(HWND_TOPMOST), self.x, y, self.px(self.width), self.px(self.card_h), SWP_SHOWWINDOW | SWP_NOACTIVATE);
         }
         self.card.keep_lit();
@@ -1056,8 +1084,8 @@ impl Panel {
                 let _ = SetForegroundWindow(self.prev);
             }
         }
-        self.capsule.exit((self.width / 2.0, 0.0));
-        self.card.exit((self.width / 2.0, 0.0));
+        self.capsule.exit();
+        self.card.exit();
     }
 
     /// Window rectangles for `--dump`: "x y w h" in pixels, or "hidden".
@@ -1186,7 +1214,7 @@ extern "system" fn panel_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
                 let _ = KillTimer(Some(hwnd), 1);
                 HUD_STATE.with(|cell| {
                     if let Ok(mut slot) = cell.try_borrow_mut() && let Some(hud) = slot.as_mut() {
-                        hud.surface.exit((hud.width / 2.0, 22.0));
+                        hud.surface.exit();
                     }
                 });
                 return LRESULT(0);
@@ -1267,7 +1295,7 @@ pub fn toast(text: &str, at: POINT) {
         } else {
             (fit(at.x - w / 2, m.work.left + 8, m.work.right - w - 8), fit(at.y - h / 2, m.work.top + 8, m.work.bottom - h - 8))
         };
-        hud.surface.enter(Family::Bloom, (w_dip / 2.0, 22.0));
+        hud.surface.enter(Family::Bloom);
         unsafe {
             let _ = SetWindowPos(hud.surface.hwnd, Some(HWND_TOPMOST), x, y, w, h, SWP_SHOWWINDOW | SWP_NOACTIVATE);
             hud.surface.keep_lit();
@@ -1348,7 +1376,7 @@ pub fn notice(text: &str, button: &str, top: POINT) {
         let (w, h) = ((n.width * m.scale).round() as i32, (NOTICE_H * m.scale).round() as i32);
         let (x, y) = if crate::config::offscreen() { offscreen_origin() } else { (top.x - w / 2, top.y) };
         if !n.surface.showing() {
-            n.surface.enter(Family::Bloom, (n.width / 2.0, NOTICE_H / 2.0));
+            n.surface.enter(Family::Bloom);
         }
         unsafe {
             let _ = SetWindowPos(n.surface.hwnd, Some(HWND_TOPMOST), x, y, w, h, SWP_SHOWWINDOW | SWP_NOACTIVATE);
@@ -1364,7 +1392,7 @@ pub fn hide_notice() {
         unsafe {
             let _ = KillTimer(Some(n.surface.hwnd), 2);
         }
-        n.surface.exit((n.width / 2.0, NOTICE_H / 2.0));
+        n.surface.exit();
     });
 }
 

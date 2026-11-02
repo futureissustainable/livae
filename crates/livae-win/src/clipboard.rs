@@ -665,14 +665,12 @@ impl Clipboard {
         let (gap, edge, total) = (p.px(gap), p.px(8.0), p.total_px(p.card_h));
         let x = glass::fit(anchor_x - p.px(TEXT_X), m.work.left + edge, m.work.right - p.px(WIDTH) - edge);
         let mut top = below + gap;
-        self.panel.anchor_bottom = top + total > m.work.bottom - edge;
         if top + total > m.work.bottom - edge {
             top = above - gap - total;
         }
         let top = glass::fit(top, m.work.top + edge, m.work.bottom - total - edge);
         self.panel.x = x;
         self.panel.top = top;
-        self.panel.anchor_x = ((anchor_x - x) as f32 / self.panel.scale).clamp(0.0, WIDTH);
     }
 
     fn hide(&mut self, restore: bool) {
@@ -830,6 +828,7 @@ impl Clipboard {
         let (scale, dark, caret) = (self.panel.scale, self.darkness(), self.caret);
         let field = &self.field;
         let mut at = None;
+        self.panel.follow();
         self.panel.capsule.draw(scale, |c| {
             c.glass(dark);
             c.glyph(glyph::CLIPBOARD, 18.0, EDGE + 2.0, 0.0, 28.0, c.h, SECONDARY);

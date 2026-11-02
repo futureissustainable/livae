@@ -319,7 +319,7 @@ impl Launcher {
         self.panel.setFrameOrigin(NSPoint::new(x, self.top - FIELD_H));
         self.query_changed();
         ui::present(&self.panel);
-        crate::motion::drop_in(&self.panel, &self.parts(), crate::motion::SEARCH);
+        crate::motion::drop_in(&self.panel, &self.parts(), livae_core::motion::DROP_Y);
         self.panel.makeFirstResponder(Some(&self.field));
         self.paint_field();
     }

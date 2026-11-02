@@ -1,10 +1,11 @@
 //! Livae's motion: one set of values for every surface on every system, so it all moves like one brand.
 //!
-//! - The search and the clipboard drop into place on a spring and come into focus (C + B): the capsule falls
-//!   `DROP_Y` onto its place, the list unfolds from `UNFOLD_FROM` of its height, and each row falls `ROW_DROP`
-//!   while it sharpens from `ROW_BLUR`, `STAGGER_MS` after the one above.
-//! - Everything else blooms into focus (A + B): windows, the toast, the break warning and Livae for Zen's gate grow
-//!   from `BLOOM_FROM` with a soft overshoot while they sharpen from `FOCUS_BLUR`; the gate's words rise `WORD_RISE`.
+//! - The search and the clipboard drop into place on a spring and come into focus (C + B): the whole panel falls
+//!   `DROP_Y` onto its place (the clipboard `CLIP_DROP_Y`), and each row falls `ROW_DROP` while it fades in,
+//!   `row_delay` after the panel starts.
+//! - Everything else blooms into focus (A + B): the contents of windows, the toast, the break warning and Livae for
+//!   Zen's gate grow from `BLOOM_FROM` with a soft overshoot while they sharpen from `FOCUS_BLUR`; the glass behind
+//!   them stays put. The gate's words rise `WORD_RISE`, `STAGGER_MS` apart, sharpening from `ROW_BLUR`.
 //! - Every exit takes `EXIT_MS` with `EASE_EXIT`, blurring to `EXIT_BLUR`: the search and the clipboard lift
 //!   `EXIT_LIFT`, the rest shrink to `EXIT_SCALE`.
 //!
@@ -29,16 +30,12 @@ pub const ROW: Spring = Spring { stiffness: 300.0, damping: 22.0 };
 pub const DROP_Y: f64 = 28.0;
 pub const CLIP_DROP_Y: f64 = 10.0;
 pub const ROW_DROP: f64 = 10.0;
-/// The list unfolds from this share of its height, from the top.
-pub const UNFOLD_FROM: f64 = 0.55;
-/// The clipboard starts this size at the text cursor.
-pub const CARET_SCALE: f64 = 0.9;
 /// Windows, the toast and the gate grow from this size.
 pub const BLOOM_FROM: f64 = 0.9;
 /// The gate's words rise this far, one after another.
 pub const WORD_RISE: f64 = 6.0;
 
-/// Blur radii in points: content coming into focus, each row, and an exit.
+/// Blur radii in points: content coming into focus, each of the gate's words, and an exit.
 pub const FOCUS_BLUR: f64 = 12.0;
 pub const ROW_BLUR: f64 = 5.0;
 pub const EXIT_BLUR: f64 = 8.0;
@@ -51,6 +48,12 @@ pub const EXIT_MS: u64 = 160;
 pub const EXIT_LIFT: f64 = 12.0;
 pub const EXIT_SCALE: f64 = 0.94;
 
+/// Seconds from a panel's start until row `index` starts to fall in: four staggers for the panel to land, then one
+/// stagger per row.
+pub fn row_delay(index: usize) -> f64 {
+    (4 + index) as f64 * STAGGER_MS as f64 / 1000.0
+}
+
 /// Cubic Béziers: coming into focus (an expo ease-out) and leaving (an ease-in).
 pub const EASE_FOCUS: [f64; 4] = [0.16, 1.0, 0.3, 1.0];
 pub const EASE_EXIT: [f64; 4] = [0.4, 0.0, 1.0, 1.0];
@@ -60,7 +63,10 @@ pub const EASE_EXIT: [f64; 4] = [0.4, 0.0, 1.0, 1.0];
 pub fn ease(curve: [f64; 4], p: f64) -> f64 {
     let [x1, y1, x2, y2] = curve;
     let at = |t: f64, a: f64, b: f64| 3.0 * (1.0 - t) * (1.0 - t) * t * a + 3.0 * (1.0 - t) * t * t * b + t * t * t;
-    let p = p.clamp(0.0, 1.0);
+    if p <= 0.0 || p >= 1.0 {
+        // Exactly at rest before the start and in place after the end.
+        return p.clamp(0.0, 1.0);
+    }
     let (mut lo, mut hi) = (0.0, 1.0);
     for _ in 0..30 {
         let t = (lo + hi) / 2.0;
@@ -116,7 +122,7 @@ mod tests {
     #[test]
     fn easing_runs_from_0_to_1() {
         for c in [EASE_FOCUS, EASE_EXIT] {
-            assert!(ease(c, 0.0).abs() < 1e-6 && (ease(c, 1.0) - 1.0).abs() < 1e-6);
+            assert!(ease(c, -0.5) == 0.0 && ease(c, 0.0) == 0.0 && ease(c, 1.0) == 1.0);
         }
         // Coming into focus is mostly done early; leaving starts slowly.
         assert!(ease(EASE_FOCUS, 0.3) > 0.8 && ease(EASE_EXIT, 0.3) < 0.15);

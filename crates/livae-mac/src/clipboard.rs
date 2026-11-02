@@ -375,8 +375,8 @@ impl Clipboard {
         self.filter();
         self.place();
         ui::present(&self.panel);
-        // It grows out of the text cursor: from its top edge when it opens below the cursor, else from its bottom.
-        crate::motion::drop_in(&self.panel, &self.parts(), crate::motion::CLIPBOARD);
+        // It falls a short way onto its place at the text cursor.
+        crate::motion::drop_in(&self.panel, &self.parts(), livae_core::motion::CLIP_DROP_Y);
         self.panel.makeFirstResponder(Some(&self.field));
         self.caret.place(&self.field);
     }
