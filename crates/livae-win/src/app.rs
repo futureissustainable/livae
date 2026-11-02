@@ -16,7 +16,7 @@ use std::time::Instant;
 
 use windows::core::w;
 use windows::Win32::Foundation::{GetLastError, SetLastError, ERROR_ALREADY_EXISTS, HWND, LPARAM, LRESULT, WIN32_ERROR, WPARAM};
-use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+use windows::Win32::System::Ole::OleInitialize;
 use windows::Win32::System::Console::{AttachConsole, GetStdHandle, ATTACH_PARENT_PROCESS, STD_OUTPUT_HANDLE};
 use windows::Win32::System::DataExchange::{AddClipboardFormatListener, RemoveClipboardFormatListener};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -138,7 +138,8 @@ pub fn run() {
     gate::install_manifest();
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        // COM for the shell, plus OLE for dragging rows out of the search.
+        let _ = OleInitialize(None);
     }
     for (flag, install) in [("--install-startup", true), ("--remove-startup", false)] {
         if config::flag(flag) {

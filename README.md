@@ -7,7 +7,8 @@ Written in Rust, native on macOS (Liquid Glass) and Windows 11, true black and q
 ## What it does
 
 - **Search** (Opt+Space on the Mac, Alt+Space on Windows): apps, files, system settings, maths and units. Enter opens, Cmd/Ctrl+Enter
-  shows the file in its folder.
+  shows the file in its folder. Drag a row out: an app lands as a shortcut, a file as your file manager would move it,
+  and the Trash takes either (on Windows, files only).
 - **Money and time**: `100 eur to ron` at the European Central Bank's daily rates (kept on disk, so it works
   offline), `time in tokyo`, `10am london` in your time, `9:30 pst to berlin`. Enter copies the answer.
 - **Commands**: lock, sleep, turn off displays, restart, shut down, log out, empty the trash, toggle dark mode,

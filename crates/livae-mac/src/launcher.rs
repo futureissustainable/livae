@@ -462,21 +462,30 @@ impl Launcher {
     }
 
     /// Mouse over the list: hover selects, click opens.
-    pub fn pointer(&mut self, y: f64, click: bool) {
+    /// The row under `y` (points up from the list's bottom).
+    fn slot(&self, y: f64) -> Option<usize> {
         let slot = ((self.card_h - INSET - y) / ROW_H).floor();
-        if slot < 0.0 {
-            return;
-        }
         let i = self.first + slot as usize;
-        if i >= self.items.len() {
-            return;
-        }
+        (slot >= 0.0 && i < self.items.len()).then_some(i)
+    }
+
+    pub fn pointer(&mut self, y: f64, click: bool) {
+        let Some(i) = self.slot(y) else { return };
         if click {
             self.open_index(i);
         } else if i != self.selected {
             self.selected = i;
             self.disarm();
             self.paint_selection(true);
+        }
+    }
+
+    /// What the row under `y` hands to a drag out of the panel: an app (a shortcut, or the Trash) or a file.
+    pub fn drag(&self, y: f64) -> Option<crate::list::Drag> {
+        match &self.items[self.slot(y)?] {
+            Item::App(a) if self.apps[*a].url.is_none() => Some(crate::list::Drag { path: self.apps[*a].path.clone(), app: true }),
+            Item::File(p) => Some(crate::list::Drag { path: p.clone(), app: false }),
+            _ => None,
         }
     }
 

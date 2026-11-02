@@ -48,6 +48,8 @@ const MAX_ITEMS: usize = 40;
 const MAX_INDEX: usize = 200_000;
 /// Hide the panel if it is no longer the active window (posted on deactivation, handled after it settles).
 const WM_CHECK_FOCUS: u32 = WM_APP + 30;
+/// Posted when a pressed row is dragged; handled outside the launcher's borrow, as the drag runs its own loop.
+const WM_DRAG_ROW: u32 = WM_APP + 31;
 
 #[derive(Clone)]
 pub struct App {
@@ -129,6 +131,8 @@ pub struct Launcher {
     /// The first half of a character outside the BMP (an emoji), waiting for its second WM_CHAR.
     high: Option<u16>,
     mouse: POINT,
+    /// The row and screen point where the button went down, until it comes up or the row is dragged.
+    press: Option<(usize, POINT)>,
     apps_ready: bool,
     apps_scanning: bool,
     apps_scanned: Option<Instant>,
@@ -181,6 +185,7 @@ pub fn install() {
         caret: true,
         high: None,
         mouse: POINT::default(),
+        press: None,
         apps_ready: false,
         apps_scanning: false,
         apps_scanned: None,
@@ -697,6 +702,19 @@ impl Launcher {
         }
     }
 
+    /// A row dragged out: an app (its shortcut, or its Store entry) or a file. The panel steps aside so the Desktop
+    /// under it can take the drop.
+    fn start_drag(&mut self, i: usize) -> Option<(windows::Win32::Foundation::HWND, String, bool)> {
+        let (item, app) = match self.items.get(i)? {
+            Item::App(a) if self.apps[*a].args.is_none() => (self.apps[*a].launch.clone(), true),
+            Item::File(p, _) => (p.to_string_lossy().into_owned(), false),
+            _ => return None,
+        };
+        let owner = self.panel.card.hwnd;
+        self.hide(true);
+        Some((owner, item, app))
+    }
+
     /// Ctrl+Enter: show the selected file (or an app's shortcut) in Explorer.
     fn reveal(&mut self) {
         let path = match self.items.get(self.selected) {
@@ -1030,9 +1048,23 @@ impl Launcher {
                 }
                 Some(LRESULT(0))
             }
+            WM_LBUTTONDOWN if card => {
+                self.press = self.slot_at(lparam).map(|i| (i, glass::cursor()));
+                Some(LRESULT(0))
+            }
             WM_MOUSEMOVE if card => {
                 // Only a real move selects: rows moving under a still pointer must not steal the selection.
                 let at = glass::cursor();
+                if let Some((i, from)) = self.press
+                    && wparam.0 & windows::Win32::System::SystemServices::MK_LBUTTON.0 as usize != 0
+                    && unsafe { (at.x - from.x).abs() > GetSystemMetrics(SM_CXDRAG) || (at.y - from.y).abs() > GetSystemMetrics(SM_CYDRAG) }
+                {
+                    self.press = None;
+                    unsafe {
+                        let _ = PostMessageW(Some(self.panel.card.hwnd), WM_DRAG_ROW, WPARAM(i), LPARAM(0));
+                    }
+                    return Some(LRESULT(0));
+                }
                 if (at.x, at.y) != (self.mouse.x, self.mouse.y) {
                     self.mouse = at;
                     if let Some(i) = self.slot_at(lparam)
@@ -1046,6 +1078,7 @@ impl Launcher {
                 Some(LRESULT(0))
             }
             WM_LBUTTONUP if card => {
+                self.press = None;
                 if let Some(i) = self.slot_at(lparam) {
                     self.open(i);
                 }
@@ -1063,6 +1096,12 @@ impl Launcher {
 
 /// Window messages for the launcher's capsule and card.
 pub fn message(part: isize, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
+    if msg == WM_DRAG_ROW {
+        if let Some((owner, item, app)) = with(|l| l.start_drag(wparam.0)).flatten() {
+            shell::drag(owner, &item, app);
+        }
+        return Some(LRESULT(0));
+    }
     with(|l| l.handle(part, msg, wparam, lparam)).flatten()
 }
 

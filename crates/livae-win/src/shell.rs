@@ -14,15 +14,30 @@ use windows::Win32::Graphics::Imaging::{
     IWICImagingFactory, WICBitmapDitherTypeNone, WICBitmapEncoderNoCache, WICBitmapInterpolationModeFant, WICBitmapPaletteTypeCustom,
     WICBitmapUsePremultipliedAlpha, WICDecodeMetadataCacheOnDemand,
 };
-use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoTaskMemFree, IPersistFile, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
+use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CoTaskMemFree, IDataObject, IPersistFile, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED};
+use windows::Win32::System::Ole::{IDropSource, DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE};
 use windows::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS};
 use windows::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION};
 use windows::Win32::UI::Shell::{
-    ILCreateFromPathW, ILFree, IShellItem, IShellItemImageFactory, IShellLinkW, IEnumShellItems, SHCreateItemFromParsingName, SHGetKnownFolderItem,
-    SHGetKnownFolderPath, SHOpenFolderAndSelectItems, ShellExecuteW, ShellLink, BHID_EnumItems, FOLDERID_AppsFolder, FOLDERID_Desktop,
+    ILCreateFromPathW, ILFree, IShellItem, IShellItemImageFactory, IShellLinkW, IEnumShellItems, SHCreateItemFromParsingName, SHDoDragDrop,
+    SHGetKnownFolderItem, SHGetKnownFolderPath, SHOpenFolderAndSelectItems, ShellExecuteW, ShellLink, BHID_DataObject, BHID_EnumItems,
+    FOLDERID_AppsFolder, FOLDERID_Desktop,
     FOLDERID_Documents, FOLDERID_Downloads, FOLDERID_Startup, KF_FLAG_DEFAULT, SIGDN_NORMALDISPLAY, SIGDN_PARENTRELATIVEPARSING, SIIGBF_ICONONLY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{GetWindowThreadProcessId, PostMessageW, SW_SHOWNORMAL, WM_APP};
+
+/// Drag `item` (a path, or "shell:AppsFolder\<id>" for a Store app) out of Livae with the shell's own data and drag
+/// image, until it is dropped. An app (`app`) only copies or links its shortcut: the Desktop gets a shortcut and the
+/// Recycle Bin refuses it (deleting a Start menu shortcut would not remove the app). A file moves, copies or links by
+/// Explorer's rules and keys, and the Recycle Bin deletes it.
+pub fn drag(owner: HWND, item: &str, app: bool) {
+    unsafe {
+        let Ok(shell) = SHCreateItemFromParsingName::<_, _, IShellItem>(&HSTRING::from(item), None) else { return };
+        let Ok(data) = shell.BindToHandler::<_, IDataObject>(None, &BHID_DataObject) else { return };
+        let effects = if app { DROPEFFECT_COPY | DROPEFFECT_LINK } else { DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK };
+        let _ = SHDoDragDrop(Some(owner), &data, None::<&IDropSource>, effects);
+    }
+}
 
 /// Posted to a window when a picture it asked for is ready.
 pub const WM_PICTURE: u32 = WM_APP + 20;
