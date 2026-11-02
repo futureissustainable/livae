@@ -55,6 +55,20 @@ pub const EXIT_SCALE: f64 = 0.94;
 pub const EASE_FOCUS: [f64; 4] = [0.16, 1.0, 0.3, 1.0];
 pub const EASE_EXIT: [f64; 4] = [0.4, 0.0, 1.0, 1.0];
 
+/// A cubic Bézier easing (`EASE_FOCUS`, `EASE_EXIT`) at progress `p` (0 to 1): the curve's x is solved for p, its
+/// y returned.
+pub fn ease(curve: [f64; 4], p: f64) -> f64 {
+    let [x1, y1, x2, y2] = curve;
+    let at = |t: f64, a: f64, b: f64| 3.0 * (1.0 - t) * (1.0 - t) * t * a + 3.0 * (1.0 - t) * t * t * b + t * t * t;
+    let p = p.clamp(0.0, 1.0);
+    let (mut lo, mut hi) = (0.0, 1.0);
+    for _ in 0..30 {
+        let t = (lo + hi) / 2.0;
+        if at(t, x1, x2) < p { lo = t } else { hi = t }
+    }
+    at((lo + hi) / 2.0, y1, y2)
+}
+
 impl Spring {
     /// Progress at `t` seconds: 0 at rest, 1 in place; above 1 while it overshoots.
     pub fn at(self, t: f64) -> f64 {
@@ -97,6 +111,15 @@ mod tests {
             assert!(peak(s) > 1.02 && peak(s) < 1.08, "{s:?} peaks at {}", peak(s));
             assert!(s.settle() < 1.0 && (s.at(s.settle()) - 1.0).abs() < 0.003);
         }
+    }
+
+    #[test]
+    fn easing_runs_from_0_to_1() {
+        for c in [EASE_FOCUS, EASE_EXIT] {
+            assert!(ease(c, 0.0).abs() < 1e-6 && (ease(c, 1.0) - 1.0).abs() < 1e-6);
+        }
+        // Coming into focus is mostly done early; leaving starts slowly.
+        assert!(ease(EASE_FOCUS, 0.3) > 0.8 && ease(EASE_EXIT, 0.3) < 0.15);
     }
 
     /// Livae for Zen's gate draws its motion in CSS: it must use these same values.

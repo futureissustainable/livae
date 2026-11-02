@@ -1,12 +1,17 @@
 //! In and out motion for every Livae window, with livae-core's motion values (`livae_core::motion`), so the Mac moves
-//! exactly like Windows and Livae for Zen:
-//! - the search and the clipboard drop into focus (`drop_in`, `drop_out`): the capsule falls onto its place on a
-//!   spring, the list unfolds under it and the rows fall in one after another, all sharpening from a blur;
-//! - everything else blooms into focus (`show`, `hide`): it grows from a little smaller with a soft overshoot while
-//!   it sharpens.
+//! like Windows and Livae for Zen:
+//! - the search and the clipboard drop into focus (`drop_in`, `drop_out`): the panel falls onto its place on a spring
+//!   and its rows fall in one after another, all sharpening from a blur;
+//! - everything else blooms into focus (`show`, `hide`): what the glass holds grows from a little smaller with a soft
+//!   overshoot while it sharpens.
 //!
-//! Apple's glass cannot be blurred, so the blur runs on what the glass holds. Reduce Motion keeps only the fades.
-//! Opening again during an exit carries on from where the exit is.
+//! Apple's glass is never transformed: on screen it does not follow a layer transform, so its rim showed at the final
+//! place while the content was still on its way (02.11.2026). The panel window moves instead (frame by frame, see
+//! `place`), and the bloom and the blur act on what the glass holds. Reduce Motion keeps only the fades. Opening again
+//! during an exit carries on from where the exit is.
+
+use std::cell::RefCell;
+use std::ptr::NonNull;
 
 use block2::RcBlock;
 use livae_core::motion::{self as m, Spring};
@@ -15,7 +20,7 @@ use objc2::Message;
 use objc2_app_kit::{NSAnimatablePropertyContainer, NSAnimationContext, NSGlassEffectView, NSView, NSWindow, NSWorkspace};
 use objc2_core_image::CIFilter;
 use objc2::runtime::AnyObject;
-use objc2_foundation::{ns_string, NSArray, NSNumber, NSObjectNSKeyValueCoding, NSRect, NSString, NSValue};
+use objc2_foundation::{ns_string, NSArray, NSNumber, NSObjectNSKeyValueCoding, NSPoint, NSRect, NSRunLoop, NSRunLoopCommonModes, NSString, NSTimer, NSValue};
 use objc2_quartz_core::{
     kCAFillModeBackwards, CABasicAnimation, CACurrentMediaTime, CAMediaTiming, CAMediaTimingFunction, CASpringAnimation, CATransaction, CATransform3D,
     NSValueCATransform3DAdditions,
@@ -30,29 +35,23 @@ pub enum Kind {
     Fade,
 }
 
-/// The parts of the search or the clipboard that move: the capsule, the list's card, and each row's views (top first).
+/// The search or the clipboard: the capsule and the card (their contents sharpen), and each row's views (top first,
+/// they fall in).
 pub struct Parts {
     pub capsule: Retained<NSView>,
     pub card: Retained<NSView>,
     pub rows: Vec<Vec<Retained<NSView>>>,
 }
 
-/// Where the search or the clipboard falls from: a drop in points, a starting size, and the fixed point of that
-/// size as fractions of the panel from its bottom left.
+/// How far the panel falls onto its place: the search `DROP_Y`, the clipboard at the text cursor `CLIP_DROP_Y`.
+/// (Glass cannot grow, so on the Mac the clipboard does not start at `CARET_SCALE`.)
 #[derive(Clone, Copy)]
 pub struct From {
     pub drop: f64,
-    pub scale: f64,
-    pub anchor: (f64, f64),
 }
 
-/// The search: falls `DROP_Y` at full size.
-pub const SEARCH: From = From { drop: m::DROP_Y, scale: 1.0, anchor: (0.5, 1.0) };
-
-/// The clipboard at the text cursor: falls `CLIP_DROP_Y` from `CARET_SCALE`, fixed at the edge nearest the cursor.
-pub fn at_caret(above: bool) -> From {
-    From { drop: m::CLIP_DROP_Y, scale: m::CARET_SCALE, anchor: (0.5, if above { 0.0 } else { 1.0 }) }
-}
+pub const SEARCH: From = From { drop: m::DROP_Y };
+pub const CLIPBOARD: From = From { drop: m::CLIP_DROP_Y };
 
 /// On screen and not leaving: what a toggle should treat as open.
 pub fn shown(window: &NSWindow) -> bool {
@@ -162,9 +161,112 @@ fn tween(view: &NSView, path: &NSString, from: f64, to: f64, ms: u64, ease: [f64
     add(view, &anim, path, delay);
 }
 
-/// What a window's glass holds (the glass itself cannot be blurred), or the view itself.
+/// What a window's glass holds, without its tint (the glass and its tint must stay put), or the view itself.
 fn inside(view: &NSView) -> Retained<NSView> {
-    view.downcast_ref::<NSGlassEffectView>().and_then(|g| g.contentView()).unwrap_or_else(|| view.retain())
+    let held = view.downcast_ref::<NSGlassEffectView>().and_then(|g| g.contentView());
+    held.and_then(|h| h.subviews().lastObject()).unwrap_or_else(|| view.retain())
+}
+
+// The panel window falling or lifting, frame by frame on the main run loop.
+
+enum How {
+    Spring(Spring),
+    Ease(u64, [f64; 4]),
+}
+
+/// A window moving up or down from where it rests (`target`): `from` points above it to `to` points above it.
+struct Move {
+    window: Retained<NSWindow>,
+    target: NSRect,
+    from: f64,
+    to: f64,
+    start: f64,
+    how: How,
+}
+
+impl Move {
+    /// Points above the resting place now, and whether the move is over.
+    fn at(&self, now: f64) -> (f64, bool) {
+        let t = (now - self.start) / slow();
+        let (v, end) = match self.how {
+            How::Spring(s) => (s.at(t), t >= s.settle()),
+            How::Ease(ms, c) => {
+                let p = t / (ms as f64 / 1000.0);
+                (m::ease(c, p), p >= 1.0)
+            }
+        };
+        (if end { self.to } else { self.from + (self.to - self.from) * v }, end)
+    }
+}
+
+thread_local! {
+    static MOVES: RefCell<Vec<Move>> = const { RefCell::new(Vec::new()) };
+    static TICKER: RefCell<Option<Retained<NSTimer>>> = const { RefCell::new(None) };
+}
+
+fn up(target: NSRect, dy: f64) -> NSPoint {
+    NSPoint::new(target.origin.x, target.origin.y + dy)
+}
+
+fn same(a: &NSWindow, b: &NSWindow) -> bool {
+    std::ptr::eq(a, b)
+}
+
+/// Where `window` is now, above its resting place, while it moves.
+fn lifted(window: &NSWindow) -> Option<f64> {
+    let now = CACurrentMediaTime();
+    MOVES.with(|m| m.borrow().iter().find(|mv| same(&mv.window, window)).map(|mv| mv.at(now).0))
+}
+
+fn tick() {
+    let now = CACurrentMediaTime();
+    let empty = MOVES.with(|m| {
+        let mut moves = m.borrow_mut();
+        moves.retain(|mv| {
+            let (dy, end) = mv.at(now);
+            mv.window.setFrameOrigin(up(mv.target, dy));
+            !end
+        });
+        moves.is_empty()
+    });
+    if empty && let Some(t) = TICKER.with(|t| t.borrow_mut().take()) {
+        t.invalidate();
+    }
+}
+
+/// Move `window` from `from` to `to` points above where it rests, replacing a move already under way.
+fn move_window(window: &NSWindow, from: f64, to: f64, how: How) {
+    let target = MOVES.with(|m| {
+        let mut moves = m.borrow_mut();
+        let old = moves.iter().position(|mv| same(&mv.window, window)).map(|i| moves.remove(i));
+        old.map_or_else(|| window.frame(), |mv| mv.target)
+    });
+    window.setFrameOrigin(up(target, from));
+    MOVES.with(|m| m.borrow_mut().push(Move { window: window.retain(), target, from, to, start: CACurrentMediaTime(), how }));
+    TICKER.with(|t| {
+        if t.borrow().is_none() {
+            let block = RcBlock::new(|_: NonNull<NSTimer>| tick());
+            let timer = unsafe { NSTimer::timerWithTimeInterval_repeats_block(1.0 / 120.0, true, &block) };
+            unsafe { NSRunLoop::mainRunLoop().addTimer_forMode(&timer, NSRunLoopCommonModes) };
+            *t.borrow_mut() = Some(timer);
+        }
+    });
+}
+
+fn stop_moving(window: &NSWindow) {
+    MOVES.with(|m| m.borrow_mut().retain(|mv| !same(&mv.window, window)));
+}
+
+/// Put a panel at its resting `frame` (its layout). While it falls or lifts, the frame becomes the place it moves to.
+pub fn place(window: &NSWindow, frame: NSRect) {
+    let dy = MOVES.with(|m| {
+        let mut moves = m.borrow_mut();
+        let mv = moves.iter_mut().find(|mv| same(&mv.window, window))?;
+        mv.target = frame;
+        Some(mv.at(CACurrentMediaTime()).0)
+    });
+    let shown = NSRect::new(up(frame, dy.unwrap_or(0.0)), frame.size);
+    window.setFrame_display(shown, true);
 }
 
 /// The blur on `view`, as a radius in points: a Core Image blur put on for the motion and taken off once sharp, so
@@ -232,6 +334,7 @@ fn end_exit(window: &NSWindow, views: &[Retained<NSView>]) -> bool {
     if window.alphaValue() > 0.0 {
         return false;
     }
+    stop_moving(window);
     window.orderOut(None);
     window.setAlphaValue(1.0);
     window.setIgnoresMouseEvents(false);
@@ -259,8 +362,9 @@ pub fn show(window: &NSWindow, kind: Kind) {
     }
     let focus = inside(&view);
     if kind == Kind::Bloom && !reduce() {
-        let from = if fresh { pose(&view, m::BLOOM_FROM, m::BLOOM_FROM, (0.5, 0.5), 0.0) } else { current(&view) };
-        spring_to(&view, from, identity(), m::BLOOM, 0.0);
+        focus.setWantsLayer(true);
+        let from = if fresh { pose(&focus, m::BLOOM_FROM, m::BLOOM_FROM, (0.5, 0.5), 0.0) } else { current(&focus) };
+        spring_to(&focus, from, identity(), m::BLOOM, 0.0);
         let start = if fresh { m::FOCUS_BLUR } else { blur_now(&focus) };
         blur(&focus, start, 0.0, m::FOCUS_MS, m::EASE_FOCUS);
     }
@@ -281,7 +385,7 @@ pub fn hide_then(window: &NSWindow, kind: Kind, done: impl Fn() + 'static) {
     begin_exit(window);
     let focus = inside(&view);
     if kind == Kind::Bloom && !reduce() {
-        ease_to(&view, pose(&view, m::EXIT_SCALE, m::EXIT_SCALE, (0.5, 0.5), 0.0), m::EXIT_MS, m::EASE_EXIT);
+        ease_to(&focus, pose(&focus, m::EXIT_SCALE, m::EXIT_SCALE, (0.5, 0.5), 0.0), m::EXIT_MS, m::EASE_EXIT);
         blur(&focus, blur_now(&focus), m::EXIT_BLUR, m::EXIT_MS, m::EASE_EXIT);
     }
     let w = window.retain();
@@ -292,8 +396,8 @@ pub fn hide_then(window: &NSWindow, kind: Kind, done: impl Fn() + 'static) {
     });
 }
 
-/// The search or the clipboard dropping into focus: the capsule falls onto its place on a spring, the card unfolds
-/// down from its top edge, each row falls in `STAGGER_MS` after the one above, and everything sharpens.
+/// The search or the clipboard dropping into focus: the panel falls onto its place on a spring, each row falls in
+/// `STAGGER_MS` after the one above, and the contents sharpen. The caller has placed and ordered it front.
 pub fn drop_in(window: &NSWindow, parts: &Parts, from: From) {
     window.setIgnoresMouseEvents(false);
     let fresh = !leaving(window);
@@ -302,19 +406,13 @@ pub fn drop_in(window: &NSWindow, parts: &Parts, from: From) {
     }
     let insides = [inside(&parts.capsule), inside(&parts.card)];
     if !reduce() {
-        for v in [&parts.capsule, &parts.card] {
-            v.setWantsLayer(true);
-        }
-        let stagger = secs(m::STAGGER_MS);
-        let capsule_from = if fresh { pose(&parts.capsule, from.scale, from.scale, from.anchor, from.drop) } else { current(&parts.capsule) };
-        spring_to(&parts.capsule, capsule_from, identity(), m::DROP, 0.0);
-        let card_from = if fresh { pose(&parts.card, from.scale, m::UNFOLD_FROM * from.scale, (0.5, 1.0), from.drop) } else { current(&parts.card) };
-        spring_to(&parts.card, card_from, identity(), m::DROP, if fresh { 3.0 * stagger } else { 0.0 });
+        move_window(window, if fresh { from.drop } else { lifted(window).unwrap_or(0.0) }, 0.0, How::Spring(m::DROP));
         for v in &insides {
             let start = if fresh { m::FOCUS_BLUR } else { blur_now(v) };
             blur(v, start, 0.0, m::FOCUS_MS, m::EASE_FOCUS);
         }
         if fresh {
+            let stagger = secs(m::STAGGER_MS);
             for (i, row) in parts.rows.iter().enumerate() {
                 let delay = (4 + i) as f64 * stagger;
                 for v in row {
@@ -328,8 +426,8 @@ pub fn drop_in(window: &NSWindow, parts: &Parts, from: From) {
     fade(window, 1.0, m::FOCUS_MS, m::EASE_FOCUS, move || insides.iter().for_each(|v| unblur(v)));
 }
 
-/// The search or the clipboard leaving: the capsule lifts `EXIT_LIFT` and the card folds up a little, blurring as
-/// they fade; then the window is ordered out (unless it was opened again meanwhile).
+/// The search or the clipboard leaving: the panel lifts `EXIT_LIFT` while its contents blur and it fades; then it
+/// is ordered out (unless it was opened again meanwhile).
 pub fn drop_out(window: &NSWindow, parts: &Parts) {
     if !window.isVisible() {
         return;
@@ -337,15 +435,13 @@ pub fn drop_out(window: &NSWindow, parts: &Parts) {
     begin_exit(window);
     let insides = [inside(&parts.capsule), inside(&parts.card)];
     if !reduce() {
-        ease_to(&parts.capsule, CATransform3D::new_translation(0.0, m::EXIT_LIFT, 0.0), m::EXIT_MS, m::EASE_EXIT);
-        ease_to(&parts.card, pose(&parts.card, 1.0, 0.85, (0.5, 1.0), 0.0), m::EXIT_MS, m::EASE_EXIT);
+        move_window(window, lifted(window).unwrap_or(0.0), m::EXIT_LIFT, How::Ease(m::EXIT_MS, m::EASE_EXIT));
         for v in &insides {
             blur(v, blur_now(v), m::EXIT_BLUR, m::EXIT_MS, m::EASE_EXIT);
         }
     }
     let w = window.retain();
-    let mut views: Vec<Retained<NSView>> = vec![parts.capsule.clone(), parts.card.clone()];
-    views.extend(insides);
+    let mut views: Vec<Retained<NSView>> = insides.to_vec();
     views.extend(parts.rows.iter().flatten().cloned());
     fade(window, 0.0, m::EXIT_MS, m::EASE_EXIT, move || {
         end_exit(&w, &views);

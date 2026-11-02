@@ -960,7 +960,7 @@ impl Launcher {
         let mut frame = self.panel.frame();
         frame.size = NSSize::new(WIDTH, h);
         frame.origin.y = self.top - h;
-        self.panel.setFrame_display(frame, true);
+        crate::motion::place(&self.panel, frame);
         self.capsule.root.setFrame(NSRect::new(NSPoint::new(0.0, h - FIELD_H), NSSize::new(WIDTH, FIELD_H)));
         self.card.root.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(WIDTH, card_h)));
         self.card.root.setHidden(n == 0);

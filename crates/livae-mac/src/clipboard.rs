@@ -373,10 +373,10 @@ impl Clipboard {
         self.selected = 0;
         self.first = 0;
         self.filter();
-        let above = self.place();
+        self.place();
         ui::present(&self.panel);
         // It grows out of the text cursor: from its top edge when it opens below the cursor, else from its bottom.
-        crate::motion::drop_in(&self.panel, &self.parts(), crate::motion::at_caret(above));
+        crate::motion::drop_in(&self.panel, &self.parts(), crate::motion::CLIPBOARD);
         self.panel.makeFirstResponder(Some(&self.field));
         self.caret.place(&self.field);
     }
@@ -403,9 +403,8 @@ impl Clipboard {
         }
     }
 
-    /// At the text cursor when the app reports it, else at the mouse; flipped above when there is no room below
-    /// (then true).
-    fn place(&mut self) -> bool {
+    /// At the text cursor when the app reports it, else at the mouse; flipped above when there is no room below.
+    fn place(&mut self) {
         let h = self.panel.frame().size.height;
         let mouse = NSEvent::mouseLocation();
         let (anchor_x, below_y, above_y) = match crate::access::caret_rect(ui::primary_height(self.mtm)) {
@@ -416,12 +415,10 @@ impl Clipboard {
         let mut x = anchor_x - TEXT_X;
         x = ui::fit(x, vf.origin.x + 8.0, vf.origin.x + vf.size.width - WIDTH - 8.0);
         let mut top = below_y;
-        let above = top - h < vf.origin.y + 8.0;
-        if above {
+        if top - h < vf.origin.y + 8.0 {
             top = (above_y + h).min(vf.origin.y + vf.size.height - 8.0);
         }
         self.panel.setFrameOrigin(NSPoint::new(x, top - h));
-        above
     }
 
     pub fn event(&mut self, event: Event) -> bool {
@@ -717,7 +714,7 @@ impl Clipboard {
         let top = frame.origin.y + frame.size.height;
         frame.size = NSSize::new(WIDTH, h);
         frame.origin.y = top - h;
-        self.panel.setFrame_display(frame, true);
+        crate::motion::place(&self.panel, frame);
         self.capsule.root.setFrame(NSRect::new(NSPoint::new(0.0, h - FIELD_H), NSSize::new(WIDTH, FIELD_H)));
         self.card.root.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(WIDTH, card_h)));
         self._list.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(WIDTH, card_h)));
