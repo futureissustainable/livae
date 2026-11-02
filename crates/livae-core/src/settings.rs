@@ -103,6 +103,8 @@ pub struct Breaks {
     pub natural_reset_min: u32,
     /// Seconds of warning before a break.
     pub notice_seconds: u32,
+    /// Minutes "Delay" in the warning moves the coming break.
+    pub delay_min: u32,
 }
 
 impl Default for Breaks {
@@ -119,6 +121,7 @@ impl Default for Breaks {
             weekends_off: true,
             natural_reset_min: 5,
             notice_seconds: 10,
+            delay_min: 30,
         }
     }
 }
@@ -139,6 +142,7 @@ impl Breaks {
             weekends_off: self.weekends_off,
             natural_reset: self.natural_reset_min as f64 * 60.0,
             notice: self.notice_seconds as f64,
+            delay: self.delay_min.max(1) as f64 * 60.0,
         }
     }
 }

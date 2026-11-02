@@ -35,6 +35,8 @@ pub struct Rules {
     pub natural_reset: f64,
     /// Warning before a break; 0 = none.
     pub notice: f64,
+    /// How far "Delay" in the warning moves the coming break.
+    pub delay: f64,
 }
 
 impl Default for Rules {
@@ -52,6 +54,7 @@ impl Default for Rules {
             weekends_off: true,
             natural_reset: 5.0 * 60.0,
             notice: 10.0,
+            delay: 30.0 * 60.0,
         }
     }
 }
@@ -314,6 +317,13 @@ impl Scheduler {
         self.worked = 0.0;
         self.postponed = true;
         Action::End
+    }
+
+    /// Move the coming break `delay` of work from now (the warning's Delay). Nothing once a break has begun.
+    pub fn delay(&mut self, r: &Rules) {
+        if self.running.is_none() {
+            self.worked = self.target(r) - r.delay;
+        }
     }
 
     /// Skip the coming break: a running break ends if it may be skipped; otherwise the timer starts over.
@@ -589,6 +599,16 @@ mod tests {
         assert!(!sim.s.can_skip(sim.local));
         let tomorrow = sim.local + Duration::days(1);
         assert!(sim.s.can_skip(tomorrow));
+    }
+
+    #[test]
+    fn delay_from_the_warning_moves_the_break() {
+        let mut sim = Sim::new(Rules { delay: 120.0, ..short() });
+        sim.step(0.0);
+        assert_eq!(sim.run(57).last(), Some(&(57, Action::Notice { seconds: 3, long: false })));
+        sim.s.delay(&sim.r);
+        assert_eq!(sim.status(), Status::Next { seconds: 120.0, long: false });
+        assert_eq!(sim.starts(125), vec![(120, false)]);
     }
 
     #[test]

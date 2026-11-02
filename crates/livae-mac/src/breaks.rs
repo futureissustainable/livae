@@ -85,6 +85,19 @@ struct Screen {
 thread_local! {
     static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
     static AWAY: Cell<Away> = const { Cell::new(Away { locked: false, asleep: false, displays_off: false }) };
+    static NOTICE: RefCell<Option<Notice>> = const { RefCell::new(None) };
+}
+
+/// The warning before a break: "Break in 10 s" and Delay, in a glass capsule at the top of the main screen.
+struct Notice {
+    panel: Retained<NSPanel>,
+    _glass: Glass,
+    label: Retained<NSTextField>,
+    delay: Retained<NSButton>,
+    /// The fill behind Delay, so it reads as a button.
+    pill: Retained<objc2_app_kit::NSBox>,
+    /// Bumped by every countdown second; a countdown that stops (away, Focus) lets the capsule go.
+    ticket: u64,
 }
 
 fn set_away(f: impl FnOnce(&mut Away)) {
@@ -132,6 +145,16 @@ define_class!(
         #[unsafe(method(displaysWoke:))]
         fn displays_woke(&self, _n: &NSNotification) {
             set_away(|a| a.displays_off = false);
+        }
+
+        /// The warning's Delay: the coming break moves `delay_min` of work later.
+        #[unsafe(method(delay:))]
+        fn delay(&self, _s: Option<&AnyObject>) {
+            act(|s, r, _, _| {
+                s.delay(r);
+                Action::None
+            });
+            hide_notice();
         }
 
         #[unsafe(method(skip:))]
@@ -346,7 +369,10 @@ fn apply(action: Action) {
     match action {
         Action::None => {}
         Action::Notice { seconds, long } => notice(seconds, long),
-        Action::Start(b) => show(b),
+        Action::Start(b) => {
+            hide_notice();
+            show(b)
+        }
         Action::End => hide(),
     }
 }
@@ -387,16 +413,97 @@ pub fn status_line() -> String {
     STATE.with(|c| c.borrow().as_ref().map(|st| st.scheduler.status(&r).line())).unwrap_or_default()
 }
 
-/// "Break in 10 s" in a glass capsule at the top of the main screen, refreshed every second until the break.
+const NOTICE_H: f64 = 48.0;
+/// Delay's fill: a 32 pt pointer target, inset 8 pt so its corners follow the capsule's.
+const PILL_H: f64 = 32.0;
+const PILL_INSET: f64 = 8.0;
+
+fn build_notice(mtm: MainThreadMarker) -> Option<Notice> {
+    let target = STATE.with(|c| c.borrow().as_ref().map(|st| st._target.clone()))?;
+    let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
+        NSPanel::alloc(mtm),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(320.0, NOTICE_H)),
+        NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel,
+        NSBackingStoreType::Buffered,
+        false,
+    );
+    panel.setOpaque(false);
+    panel.setBackgroundColor(Some(&NSColor::clearColor()));
+    panel.setHasShadow(false);
+    panel.setLevel(objc2_app_kit::NSStatusWindowLevel);
+    panel.setCollectionBehavior(NSWindowCollectionBehavior::CanJoinAllSpaces | NSWindowCollectionBehavior::FullScreenAuxiliary);
+    unsafe { panel.setReleasedWhenClosed(false) };
+    panel.setAppearance(NSAppearance::appearanceNamed(unsafe { NSAppearanceNameDarkAqua }).as_deref());
+    let glass = Glass::new(mtm, NOTICE_H / 2.0, 1.0);
+    let label = ui::label(mtm, text::LABEL.size, TEXT);
+    label.setFont(Some(&crate::font::sans(text::LABEL.size, unsafe { NSFontWeightMedium })));
+    let delay = quiet_button(mtm, &format!("Delay {} min", config::get().breaks.delay_min.max(1)), sel!(delay:), &target);
+    let pill = ui::band(mtm, PILL_H / 2.0);
+    glass.content.addSubview(&label);
+    glass.content.addSubview(&pill);
+    glass.content.addSubview(&delay);
+    panel.setContentView(Some(&glass.root));
+    Some(Notice { panel, _glass: glass, label, delay, pill, ticket: 0 })
+}
+
+/// The countdown second `seconds` before a break: the capsule appears (popping in the first time) and counts down;
+/// it goes when the break starts, Delay is pressed, or the countdown stops.
 fn notice(seconds: u32, long: bool) {
     let mtm = MainThreadMarker::new().unwrap();
-    let at = if crate::app::offscreen() {
-        NSPoint::new(ui::OFFSCREEN, ui::OFFSCREEN)
-    } else {
-        let f = NSScreen::mainScreen(mtm).map(|s| s.visibleFrame()).unwrap_or(NSRect::ZERO);
-        NSPoint::new(f.origin.x + f.size.width / 2.0, f.origin.y + f.size.height - tokens::space::S4 - 20.0)
-    };
-    crate::hud::show(&format!("{} in {seconds} s", if long { "Long break" } else { "Break" }), at);
+    let ticket = NOTICE.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        if slot.is_none() {
+            *slot = build_notice(mtm);
+        }
+        let n = slot.as_mut()?;
+        n.label.setStringValue(&NSString::from_str(&format!("{} in {seconds} s", if long { "Long break" } else { "Break" })));
+        n.label.sizeToFit();
+        n.delay.setTitle(&NSString::from_str(&format!("Delay {} min", config::get().breaks.delay_min.max(1))));
+        n.delay.setAttributedTitle(&styled(&n.delay.title().to_string(), &crate::font::sans(text::LABEL.size, unsafe { NSFontWeightMedium }), SECONDARY, text::LABEL.leading));
+        n.delay.sizeToFit();
+        // The label fits its widest count ("in 10 s"), so the button stays put as the seconds tick down.
+        let (pad, gap) = (tokens::space::S6, tokens::space::S4);
+        let label_w = n.label.frame().size.width.max(110.0);
+        let (bw, bh) = (n.delay.frame().size.width, n.delay.frame().size.height);
+        let pill_w = bw + 2.0 * tokens::space::S4;
+        let w = pad + label_w + gap + pill_w + PILL_INSET;
+        let pill_x = w - PILL_INSET - pill_w;
+        n.label.setFrame(NSRect::new(NSPoint::new(pad, (NOTICE_H - 18.0) / 2.0), NSSize::new(label_w, 18.0)));
+        n.pill.setFrame(NSRect::new(NSPoint::new(pill_x, (NOTICE_H - PILL_H) / 2.0), NSSize::new(pill_w, PILL_H)));
+        n.delay.setFrame(NSRect::new(NSPoint::new(pill_x, (NOTICE_H - bh) / 2.0), NSSize::new(pill_w, bh)));
+        let origin = if crate::app::offscreen() {
+            NSPoint::new(ui::OFFSCREEN, ui::OFFSCREEN)
+        } else {
+            let f = NSScreen::mainScreen(mtm).map(|s| s.visibleFrame()).unwrap_or(NSRect::ZERO);
+            NSPoint::new(f.origin.x + (f.size.width - w) / 2.0, f.origin.y + f.size.height - tokens::space::S4 - NOTICE_H)
+        };
+        let shown = crate::motion::shown(&n.panel);
+        n.panel.setFrame_display(NSRect::new(origin, NSSize::new(w, NOTICE_H)), true);
+        if !shown {
+            n.panel.orderFrontRegardless();
+            crate::motion::show(&n.panel, crate::motion::POP);
+        }
+        n.ticket += 1;
+        Some(n.ticket)
+    });
+    let Some(ticket) = ticket else { return };
+    let after = dispatch2::DispatchTime::NOW.time(1_600_000_000);
+    let _ = dispatch2::DispatchQueue::main().after(after, move || {
+        if NOTICE.with(|c| c.borrow().as_ref().is_some_and(|n| n.ticket == ticket)) {
+            hide_notice();
+        }
+    });
+}
+
+fn hide_notice() {
+    NOTICE.with(|c| {
+        if let Some(n) = c.borrow_mut().as_mut() {
+            n.ticket += 1;
+            if crate::motion::shown(&n.panel) {
+                crate::motion::hide(&n.panel, crate::motion::SHRINK);
+            }
+        }
+    });
 }
 
 /// The quotes in `quotes.md` (the built-in 13 when the file is missing or empty). Livae for Zen gets the same list.

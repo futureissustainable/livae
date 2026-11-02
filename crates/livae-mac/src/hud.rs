@@ -71,6 +71,8 @@ pub fn show(text: &str, at: NSPoint) {
         if !was {
             crate::motion::show(&hud.panel, crate::motion::POP);
         }
+        // A confirmation never takes a click from the app below.
+        hud.panel.setIgnoresMouseEvents(true);
         hud.shown += 1;
         hud.shown
     });
