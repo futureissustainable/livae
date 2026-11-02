@@ -255,16 +255,8 @@ unsafe extern "C-unwind" fn io(
             dst.fill(0.0);
             continue;
         };
-        let m = src.mNumberChannels as usize;
         let s = unsafe { std::slice::from_raw_parts(src.mData as *const f32, src.mDataByteSize as usize / 4) };
-        let frames = (s.len() / m).min(dst.len() / n);
-        for f in 0..frames {
-            for c in 0..n {
-                // A mono tap feeds every channel; a stereo tap its own two, the rest stay silent.
-                dst[f * n + c] = if m == 1 { s[f] } else if c < m { s[f * m + c] } else { 0.0 };
-            }
-        }
-        dst[frames * n..].fill(0.0);
+        let frames = livae_core::eq::route(s, src.mNumberChannels as usize, dst, n);
         rt.chain.process(&mut dst[..frames * n], n);
     }
     0

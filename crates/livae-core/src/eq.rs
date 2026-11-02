@@ -346,11 +346,42 @@ impl Chain {
     }
 }
 
+/// Copy interleaved `src` (`m` channels) into interleaved `dst` (`n` channels) for the equaliser's output: a mono
+/// source feeds every channel, a wider one its own channels, the rest are silent; frames past the shorter of the two
+/// are silent too. Returns the frames copied. For the real-time thread: no allocation.
+pub fn route(src: &[f32], m: usize, dst: &mut [f32], n: usize) -> usize {
+    if m == 0 || n == 0 {
+        dst.fill(0.0);
+        return 0;
+    }
+    let frames = (src.len() / m).min(dst.len() / n);
+    for f in 0..frames {
+        for c in 0..n {
+            dst[f * n + c] = if m == 1 { src[f] } else if c < m { src[f * m + c] } else { 0.0 };
+        }
+    }
+    dst[frames * n..].fill(0.0);
+    frames
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const RATE: f64 = 48000.0;
+
+    #[test]
+    fn the_tap_reaches_every_output_channel_it_should() {
+        let mut out = [9.0f32; 8];
+        assert_eq!(route(&[0.1, 0.2, 0.3, 0.4], 2, &mut out, 4), 2);
+        assert_eq!(out, [0.1, 0.2, 0.0, 0.0, 0.3, 0.4, 0.0, 0.0], "stereo into four channels");
+        let mut out = [9.0f32; 6];
+        assert_eq!(route(&[0.5, 0.6], 1, &mut out, 2), 2);
+        assert_eq!(out, [0.5, 0.5, 0.6, 0.6, 0.0, 0.0], "mono feeds both, the frames it lacks are silent");
+        let mut out = [9.0f32; 2];
+        assert_eq!(route(&[0.1, 0.2, 0.3], 3, &mut out, 2), 1);
+        assert_eq!(out, [0.1, 0.2]);
+    }
 
     #[test]
     fn autoeq_text_reads_and_writes_back() {
