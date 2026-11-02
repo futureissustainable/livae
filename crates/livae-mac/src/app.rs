@@ -93,7 +93,9 @@ thread_local! {
     /// The disabled first line of the Breaks submenu ("Next break in 12 min"), refreshed when the menu opens.
     static BREAKS_STATUS: RefCell<Option<Retained<NSMenuItem>>> = const { RefCell::new(None) };
     static JOURNAL_STATUS: RefCell<Option<Retained<NSMenuItem>>> = const { RefCell::new(None) };
-    /// The Equaliser submenu's status line, its on/off item and its compare item.
+    /// The menu-bar menu, for `--design-dump`.
+    static MENU: RefCell<Option<Retained<NSMenu>>> = const { RefCell::new(None) };
+    /// The Equaliser item (its subtitle is the status), its on/off item and its compare item.
     static EQ_ITEMS: RefCell<Option<[Retained<NSMenuItem>; 3]>> = const { RefCell::new(None) };
     static SHORTCUTS: RefCell<Option<Shortcuts>> = const { RefCell::new(None) };
     static KEEP: RefCell<Vec<Retained<AnyObject>>> = const { RefCell::new(Vec::new()) };
@@ -208,25 +210,7 @@ define_class!(
     unsafe impl NSMenuDelegate for AppDelegate {
         #[unsafe(method(menuWillOpen:))]
         fn menu_will_open(&self, _menu: &NSMenu) {
-            BREAKS_STATUS.with(|b| {
-                if let Some(item) = b.borrow().as_ref() {
-                    item.setTitle(&NSString::from_str(&crate::breaks::status_line()));
-                }
-            });
-            JOURNAL_STATUS.with(|j| {
-                if let Some(item) = j.borrow().as_ref() {
-                    item.setTitle(&NSString::from_str(&crate::journal::status_line()));
-                }
-            });
-            EQ_ITEMS.with(|e| {
-                if let Some([status, toggle, compare]) = e.borrow().as_ref() {
-                    let s = config::get().sound;
-                    status.setTitle(&NSString::from_str(&crate::sound::status().text()));
-                    toggle.setTitle(if s.eq { ns_string!("Turn Off") } else { ns_string!("Turn On") });
-                    compare.setState(if s.bypass { objc2_app_kit::NSControlStateValueOn } else { objc2_app_kit::NSControlStateValueOff });
-                    compare.setEnabled(s.eq);
-                }
-            });
+            refresh_menu();
         }
     }
 
@@ -328,6 +312,60 @@ impl AppDelegate {
     }
 }
 
+/// Bring the menu's status lines and toggles up to date (when it opens, and for `--design-dump`).
+fn refresh_menu() {
+    let subtitle = |item: &NSMenuItem, text: &str| item.setSubtitle((!text.is_empty()).then(|| NSString::from_str(text)).as_deref());
+    BREAKS_STATUS.with(|b| {
+        if let Some(item) = b.borrow().as_ref() {
+            subtitle(item, &crate::breaks::status_line());
+        }
+    });
+    JOURNAL_STATUS.with(|j| {
+        if let Some(item) = j.borrow().as_ref() {
+            subtitle(item, &crate::journal::status_line());
+        }
+    });
+    EQ_ITEMS.with(|e| {
+        if let Some([item, toggle, compare]) = e.borrow().as_ref() {
+            let s = config::get().sound;
+            subtitle(item, &crate::sound::status().text());
+            toggle.setTitle(if s.eq { ns_string!("Turn Off") } else { ns_string!("Turn On") });
+            compare.setState(if s.bypass { objc2_app_kit::NSControlStateValueOn } else { objc2_app_kit::NSControlStateValueOff });
+            compare.setEnabled(s.eq);
+        }
+    });
+}
+
+/// `--design-dump dir`: the Settings window, pane by pane, and the menu-bar menu, as lines for the design checks.
+pub fn design_dump(dir: &str) {
+    let _ = std::fs::create_dir_all(dir);
+    crate::settings::show();
+    for pane in crate::settings::panes() {
+        crate::settings::show_pane(pane);
+        if let Some(w) = crate::settings::window() {
+            let _ = std::fs::write(format!("{dir}/settings-{pane}.tsv"), crate::inspect::window(&w));
+        }
+    }
+    refresh_menu();
+    if let Some(m) = MENU.with(|m| m.borrow().clone()) {
+        let _ = std::fs::write(format!("{dir}/menu.tsv"), crate::inspect::menu(&m));
+    }
+}
+
+/// A top-level menu item with its SF Symbol, as macOS 26 menus show them (Quit gets its own from the system).
+fn icon_item(mtm: MainThreadMarker, title: &str, symbol: &str, action: Option<objc2::runtime::Sel>, target: &AppDelegate) -> Retained<NSMenuItem> {
+    let item = match action {
+        Some(a) => menu_item(mtm, title, a, "", target),
+        None => {
+            let item = NSMenuItem::new(mtm);
+            item.setTitle(&NSString::from_str(title));
+            item
+        }
+    };
+    item.setImage(crate::ui::symbol(symbol).as_deref());
+    item
+}
+
 fn menu_item(mtm: MainThreadMarker, title: &str, action: objc2::runtime::Sel, key: &str, target: &AppDelegate) -> Retained<NSMenuItem> {
     let item = unsafe { NSMenuItem::initWithTitle_action_keyEquivalent(NSMenuItem::alloc(mtm), &NSString::from_str(title), Some(action), &NSString::from_str(key)) };
     unsafe { item.setTarget(Some(target)) };
@@ -357,49 +395,40 @@ fn start(mtm: MainThreadMarker, delegate: &AppDelegate) {
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
 
     let status = NSStatusBar::systemStatusBar().statusItemWithLength(NSVariableStatusItemLength);
+    // Four groups: open (search, clipboard), today (journal, year), what runs (breaks, equaliser, clipboard
+    // pause), the app. Each status sits under its item as a subtitle, never as a row of its own.
     let menu = NSMenu::new(mtm);
-    let search = menu_item(mtm, "Search", sel!(openLauncher:), "", delegate);
-    let clip = menu_item(mtm, "Clipboard", sel!(openClipboard:), "", delegate);
+    let search = icon_item(mtm, "Search", "magnifyingglass", Some(sel!(openLauncher:)), delegate);
+    let clip = icon_item(mtm, "Clipboard", "doc.on.clipboard", Some(sel!(openClipboard:)), delegate);
     menu.addItem(&search);
     menu.addItem(&clip);
-    let taken = menu_item(mtm, "A shortcut is in use by another app…", sel!(openSettings:), "", delegate);
+    let taken = icon_item(mtm, "A Shortcut Is Taken", "exclamationmark.triangle", Some(sel!(openSettings:)), delegate);
+    taken.setSubtitle(Some(ns_string!("Another app uses it; choose another in Settings")));
     taken.setHidden(true);
     menu.addItem(&taken);
     menu.addItem(&NSMenuItem::separatorItem(mtm));
-    menu.addItem(&menu_item(mtm, "Journal…", sel!(openJournal:), "", delegate));
-    menu.addItem(&menu_item(mtm, "Year…", sel!(openYear:), "", delegate));
-    let journal_status = NSMenuItem::new(mtm);
-    journal_status.setEnabled(false);
-    menu.addItem(&journal_status);
-    JOURNAL_STATUS.with(|j| *j.borrow_mut() = Some(journal_status));
+    let journal = icon_item(mtm, "Journal…", "book", Some(sel!(openJournal:)), delegate);
+    menu.addItem(&journal);
+    menu.addItem(&icon_item(mtm, "Year View…", "calendar", Some(sel!(openYear:)), delegate));
+    JOURNAL_STATUS.with(|j| *j.borrow_mut() = Some(journal));
     menu.addItem(&NSMenuItem::separatorItem(mtm));
-    menu.addItem(&menu_item(mtm, "Pause Clipboard History", sel!(togglePause:), "", delegate));
-    // Breaks: what is next, and the few things one does with it.
-    let breaks_item = NSMenuItem::new(mtm);
-    breaks_item.setTitle(ns_string!("Breaks"));
+    // Breaks: what is next (the subtitle), and the few things one does with it.
+    let breaks_item = icon_item(mtm, "Breaks", "cup.and.saucer", None, delegate);
     let breaks_menu = NSMenu::new(mtm);
-    let breaks_status = NSMenuItem::new(mtm);
-    breaks_status.setEnabled(false);
-    breaks_menu.addItem(&breaks_status);
-    breaks_menu.addItem(&NSMenuItem::separatorItem(mtm));
     breaks_menu.addItem(&menu_item(mtm, "Take a Break Now", sel!(breakNow:), "", delegate));
     breaks_menu.addItem(&menu_item(mtm, "Skip to Next Break", sel!(breakSkip:), "", delegate));
+    breaks_menu.addItem(&NSMenuItem::separatorItem(mtm));
     breaks_menu.addItem(&menu_item(mtm, "Pause for 1 Hour", sel!(breakPause1h:), "", delegate));
     breaks_menu.addItem(&menu_item(mtm, "Pause Until Tomorrow", sel!(breakPauseMorning:), "", delegate));
     breaks_menu.addItem(&menu_item(mtm, "Resume", sel!(breakResume:), "", delegate));
     breaks_item.setSubmenu(Some(&breaks_menu));
     menu.addItem(&breaks_item);
-    BREAKS_STATUS.with(|b| *b.borrow_mut() = Some(breaks_status));
-    // The equaliser: what it is doing, on or off, and its window.
-    let eq_item = NSMenuItem::new(mtm);
-    eq_item.setTitle(ns_string!("Equaliser"));
+    BREAKS_STATUS.with(|b| *b.borrow_mut() = Some(breaks_item));
+    // The equaliser: what it is doing (the subtitle), on or off, compare, and its window.
+    let eq_item = icon_item(mtm, "Equaliser", "slider.vertical.3", None, delegate);
     let eq_menu = NSMenu::new(mtm);
     // Items enable as set below (compare only while the equaliser is on).
     eq_menu.setAutoenablesItems(false);
-    let eq_status = NSMenuItem::new(mtm);
-    eq_status.setEnabled(false);
-    eq_menu.addItem(&eq_status);
-    eq_menu.addItem(&NSMenuItem::separatorItem(mtm));
     let eq_toggle = menu_item(mtm, "Turn On", sel!(eqToggle:), "", delegate);
     eq_menu.addItem(&eq_toggle);
     let eq_compare = menu_item(mtm, "Filters Off (Compare)", sel!(eqCompare:), "", delegate);
@@ -408,15 +437,17 @@ fn start(mtm: MainThreadMarker, delegate: &AppDelegate) {
     eq_menu.addItem(&menu_item(mtm, "Edit Equaliser…", sel!(eqEdit:), "", delegate));
     eq_item.setSubmenu(Some(&eq_menu));
     menu.addItem(&eq_item);
-    EQ_ITEMS.with(|e| *e.borrow_mut() = Some([eq_status, eq_toggle, eq_compare]));
+    EQ_ITEMS.with(|e| *e.borrow_mut() = Some([eq_item.clone(), eq_toggle, eq_compare]));
+    menu.addItem(&icon_item(mtm, "Pause Clipboard History", "pause.circle", Some(sel!(togglePause:)), delegate));
     menu.setDelegate(Some(ProtocolObject::from_ref(delegate)));
     menu.addItem(&NSMenuItem::separatorItem(mtm));
-    menu.addItem(&menu_item(mtm, "Settings…", sel!(openSettings:), ",", delegate));
-    menu.addItem(&menu_item(mtm, "Welcome", sel!(openWelcome:), "", delegate));
-    menu.addItem(&NSMenuItem::separatorItem(mtm));
+    let settings = icon_item(mtm, "Settings…", "gearshape", Some(sel!(openSettings:)), delegate);
+    settings.setKeyEquivalent(ns_string!(","));
+    menu.addItem(&settings);
     let quit = unsafe { NSMenuItem::initWithTitle_action_keyEquivalent(NSMenuItem::alloc(mtm), ns_string!("Quit Livae"), Some(sel!(terminate:)), ns_string!("q")) };
     menu.addItem(&quit);
     status.setMenu(Some(&menu));
+    MENU.with(|m| *m.borrow_mut() = Some(menu.clone()));
 
     crate::launcher::install(mtm);
     crate::clipboard::install(mtm);
@@ -510,6 +541,13 @@ fn start(mtm: MainThreadMarker, delegate: &AppDelegate) {
     }
     if args.iter().any(|a| a == "--settings") {
         crate::settings::show();
+    }
+    if let Some(pane) = args.iter().position(|a| a == "--settings-pane").and_then(|i| args.get(i + 1)).filter(|_| test_mode()) {
+        crate::settings::show_pane(pane);
+    }
+    if let Some(dir) = args.iter().position(|a| a == "--design-dump").and_then(|i| args.get(i + 1)).cloned().filter(|_| test_mode()) {
+        let after = dispatch2::DispatchTime::NOW.time(2_000_000_000);
+        let _ = dispatch2::DispatchQueue::main().after(after, move || design_dump(&dir));
     }
     if args.iter().any(|a| a == "--equalizer") {
         crate::equalizer::show();

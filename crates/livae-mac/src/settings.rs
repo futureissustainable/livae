@@ -571,6 +571,17 @@ pub fn refresh() {
     });
 }
 
+/// The window's panes, for `--design-dump` (one page today).
+pub fn panes() -> Vec<&'static str> {
+    vec!["all"]
+}
+
+pub fn show_pane(_pane: &str) {}
+
+pub fn window() -> Option<Retained<NSWindow>> {
+    UI.with(|u| u.borrow().as_ref().map(|ui| ui.window.clone()))
+}
+
 pub fn set_glass(darkness: f64) {
     UI.with(|u| {
         if let Some(ui) = u.borrow().as_ref() {

@@ -27,6 +27,8 @@ mod glass;
 mod hud;
 #[cfg(target_os = "macos")] mod journal;
 #[cfg(target_os = "macos")]
+mod inspect;
+#[cfg(target_os = "macos")]
 mod launcher;
 #[cfg(target_os = "macos")]
 mod list;
