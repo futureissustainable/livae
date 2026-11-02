@@ -223,7 +223,10 @@ fn apply(action: Action) {
     match action {
         Action::None => {}
         Action::Notice { seconds, long } => notice(seconds, long),
-        Action::Start(b) => show(b),
+        Action::Start(b) => {
+            glass::hide_notice();
+            show(b)
+        }
         Action::End => hide(),
     }
 }
@@ -274,11 +277,21 @@ pub fn settled() -> bool {
     with(|st| st.screens.is_empty() || st.fade == Fade::Shown).unwrap_or(true)
 }
 
-/// "Break in 10 s" in a toast at the top of the main monitor, refreshed every second until the break.
+/// "Break in 10 s" with Delay, at the top of the main monitor, refreshed every second until the break.
 fn notice(seconds: u32, long: bool) {
     let m = glass::monitor_at(POINT { x: 0, y: 0 });
-    let at = POINT { x: (m.work.left + m.work.right) / 2, y: m.work.top + ((16.0 + 22.0) * m.scale).round() as i32 };
-    glass::toast(&format!("{} in {seconds} s", if long { "Long break" } else { "Break" }), at);
+    let top = POINT { x: (m.work.left + m.work.right) / 2, y: m.work.top + (16.0 * m.scale).round() as i32 };
+    let text = format!("{} in {seconds} s", if long { "Long break" } else { "Break" });
+    glass::notice(&text, &format!("Delay {} min", config::get().breaks.delay_min.max(1)), top);
+}
+
+/// The warning's Delay: the coming break moves `delay_min` of work later.
+pub fn delay_from_notice() {
+    act(|s, r, _, _| {
+        s.delay(r);
+        Action::None
+    });
+    glass::hide_notice();
 }
 struct Display {
     rect: RECT,

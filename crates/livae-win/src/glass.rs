@@ -88,6 +88,7 @@ pub const HUD: isize = 5;
 pub const BREAK: isize = 6;
 pub const JOURNAL: isize = 7;
 pub const JOURNAL_VEIL: isize = 8;
+pub const NOTICE: isize = 9;
 
 /// Space between the capsule and the card.
 pub const GAP: f32 = 10.0;
@@ -107,7 +108,6 @@ pub enum Font {
 
 /// Segoe Fluent Icons code points (Windows 11; Segoe MDL2 Assets on Windows 10 has the same ones).
 pub mod glyph {
-    pub const SEARCH: char = '\u{E721}';
     pub const CLIPBOARD: char = '\u{E77F}';
     pub const APPS: char = '\u{E71D}';
     pub const FOLDER: char = '\u{E8B7}';
@@ -723,7 +723,9 @@ impl Canvas<'_> {
         };
         let (cx, m) = if f.is_empty() { (0.0, hit(0).1) } else { hit(f.utf16(f.caret())) };
         let shift = (cx - (w - 2.0)).max(0.0);
-        unsafe { self.t.PushAxisAlignedClip(&rect(x, y, w, h), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
+        // An empty field's caret stands just before its hint text, so the clip makes room on the left.
+        let room = if f.is_empty() { 8.0 } else { 0.0 };
+        unsafe { self.t.PushAxisAlignedClip(&rect(x - room, y, w + room, h), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE) };
         if let Some((a, b)) = f.selection() {
             let (xa, _) = hit(f.utf16(a));
             let (xb, _) = hit(f.utf16(b));
@@ -731,7 +733,14 @@ impl Canvas<'_> {
         }
         self.layout(&l, x - shift, y, if f.is_empty() { TERTIARY } else { TEXT });
         if caret && f.selection().is_none() {
-            self.fill(x + cx - shift, y + m.top + 1.0, 1.5, (m.height - 2.0).max(8.0), TEXT);
+            // The glowing caret (the macOS 27 Spotlight look): a 3 DIP bar with a soft white halo, clear of the
+            // letters: just after the last one, or just before an empty field's hint text.
+            let bx = if f.is_empty() { x - 5.0 } else { x + cx - shift + 1.0 };
+            let (top, ch) = (y + m.top + 1.0, (m.height - 2.0).max(8.0));
+            for (grow, a) in [(6.0, 0.05), (3.0, 0.10)] {
+                self.round(bx - grow, top - grow, 3.0 + 2.0 * grow, ch + 2.0 * grow, 1.5 + grow, white(a));
+            }
+            self.round(bx, top, 3.0, ch, 1.5, TEXT);
         }
         unsafe { self.t.PopAxisAlignedClip() };
         (x + cx - shift, y + m.top, m.height)
@@ -1049,7 +1058,7 @@ pub fn register() {
 extern "system" fn panel_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     unsafe {
         let part = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
-        let passive = matches!(part, LAUNCHER_CARD | CLIP_CARD | HUD | JOURNAL_VEIL);
+        let passive = matches!(part, LAUNCHER_CARD | CLIP_CARD | HUD | JOURNAL_VEIL | NOTICE);
         match msg {
             // The frame stays for DWM's backdrop but takes no room: the client area is the whole window.
             WM_NCCALCSIZE if wparam.0 != 0 => return LRESULT(0),
@@ -1091,6 +1100,30 @@ extern "system" fn panel_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPAR
             WM_PAINT if part == HUD => {
                 hud_paint();
                 let _ = ValidateRect(Some(hwnd), None);
+                return LRESULT(0);
+            }
+            WM_PAINT if part == NOTICE => {
+                with_notice(draw_notice);
+                let _ = ValidateRect(Some(hwnd), None);
+                return LRESULT(0);
+            }
+            // The countdown stopped (away, Focus): the warning goes.
+            WM_TIMER if part == NOTICE && wparam.0 == 2 => {
+                hide_notice();
+                return LRESULT(0);
+            }
+            WM_LBUTTONUP if part == NOTICE => {
+                let (x, y) = ((lparam.0 & 0xFFFF) as i16 as f32, ((lparam.0 >> 16) & 0xFFFF) as i16 as f32);
+                let hit = NOTICE_STATE.with(|c| {
+                    c.borrow().as_ref().is_some_and(|n| {
+                        let (px, py, pw, ph) = n.pill;
+                        let (x, y) = (x / n.scale, y / n.scale);
+                        x >= px && x <= px + pw && y >= py && y <= py + ph
+                    })
+                });
+                if hit {
+                    crate::breaks::delay_from_notice();
+                }
                 return LRESULT(0);
             }
             _ => {}
@@ -1166,5 +1199,90 @@ fn hud_paint() {
         if let Ok(mut slot) = cell.try_borrow_mut() && let Some(h) = slot.as_mut() {
             draw_hud(h);
         }
+    });
+}
+
+// The break warning ("Break in 9 s" and Delay): a capsule like the toast that never takes the focus, but whose
+// Delay can be clicked. 48 DIP tall; Delay sits in a 32 DIP fill inset 8 DIP, so its corners follow the capsule's.
+
+const NOTICE_H: f32 = 48.0;
+const PILL_H: f32 = 32.0;
+const PILL_INSET: f32 = 8.0;
+
+struct Notice {
+    surface: Surface,
+    text: String,
+    button: String,
+    scale: f32,
+    width: f32,
+    /// Delay's fill in DIPs: x, y, width, height.
+    pill: (f32, f32, f32, f32),
+}
+
+thread_local! {
+    static NOTICE_STATE: RefCell<Option<Notice>> = const { RefCell::new(None) };
+}
+
+fn with_notice(f: impl FnOnce(&mut Notice)) {
+    NOTICE_STATE.with(|cell| {
+        if let Ok(mut slot) = cell.try_borrow_mut() && let Some(n) = slot.as_mut() {
+            f(n);
+        }
+    });
+}
+
+fn notice_format() -> IDWriteTextFormat {
+    gfx().format(Font::Sans, 14.0, windows::Win32::Graphics::DirectWrite::DWRITE_FONT_WEIGHT_MEDIUM, false, false)
+}
+
+/// Show or update the warning, its top edge centred on `top`; it pops in the first time and goes by itself when
+/// the countdown stops calling.
+pub fn notice(text: &str, button: &str, top: POINT) {
+    NOTICE_STATE.with(|cell| {
+        let Ok(mut slot) = cell.try_borrow_mut() else { return };
+        let n = slot.get_or_insert_with(|| Notice { surface: Surface::new(NOTICE, None, false), text: String::new(), button: String::new(), scale: 1.0, width: 0.0, pill: (0.0, 0.0, 0.0, 0.0) });
+        let m = monitor_at(top);
+        n.scale = m.scale;
+        n.text = text.to_string();
+        n.button = button.to_string();
+        let fmt = notice_format();
+        // The label fits its widest count ("in 10 s"), so Delay stays put as the seconds tick down.
+        let label_w = gfx().width(text, &fmt).max(110.0);
+        let pill_w = gfx().width(button, &fmt) + 32.0;
+        n.width = 24.0 + label_w + 16.0 + pill_w + PILL_INSET;
+        n.pill = (n.width - PILL_INSET - pill_w, (NOTICE_H - PILL_H) / 2.0, pill_w, PILL_H);
+        let (w, h) = ((n.width * m.scale).round() as i32, (NOTICE_H * m.scale).round() as i32);
+        let (x, y) = if crate::config::offscreen() { offscreen_origin() } else { (top.x - w / 2, top.y) };
+        if !n.surface.showing() {
+            n.surface.enter(Pose::Pop, (n.width / 2.0, NOTICE_H / 2.0), tokens::motion::POP);
+        }
+        unsafe {
+            let _ = SetWindowPos(n.surface.hwnd, Some(HWND_TOPMOST), x, y, w, h, SWP_SHOWWINDOW | SWP_NOACTIVATE);
+            n.surface.keep_lit();
+            let _ = SetTimer(Some(n.surface.hwnd), 2, 1600, None);
+        }
+        draw_notice(n);
+    });
+}
+
+pub fn hide_notice() {
+    with_notice(|n| {
+        unsafe {
+            let _ = KillTimer(Some(n.surface.hwnd), 2);
+        }
+        n.surface.exit((n.width / 2.0, NOTICE_H / 2.0));
+    });
+}
+
+fn draw_notice(n: &mut Notice) {
+    let (text, button, pill) = (n.text.clone(), n.button.clone(), n.pill);
+    n.surface.draw(n.scale, |c| {
+        c.glass(1.0);
+        let fmt = notice_format();
+        c.text(&text, &fmt, 24.0, 0.0, gfx().width(&text, &fmt) + 2.0, c.h, TEXT);
+        let (px, py, pw, ph) = pill;
+        c.round(px, py, pw, ph, ph / 2.0, white(BAND));
+        let bw = gfx().width(&button, &fmt);
+        c.text(&button, &fmt, px + (pw - bw) / 2.0, 0.0, bw + 2.0, c.h, SECONDARY);
     });
 }

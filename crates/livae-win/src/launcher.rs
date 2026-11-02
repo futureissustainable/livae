@@ -33,7 +33,9 @@ use crate::glass::{self, glyph, gfx, Font, Panel, Trim, BAND, BAND_RADIUS, SECON
 use crate::{app, config, shell};
 
 const WIDTH: f32 = 720.0;
-const FIELD_H: f32 = 56.0;
+/// The search capsule: 72 DIP tall with a 28 DIP query on the titles' column (the macOS 27 Spotlight look).
+const FIELD_H: f32 = 72.0;
+const QUERY: f32 = livae_core::tokens::text::H3.size as f32;
 const ROW_H: f32 = 46.0;
 const INSET: f32 = 8.0;
 const EDGE: f32 = 16.0;
@@ -586,6 +588,8 @@ impl Launcher {
         let n = self.rows();
         self.panel.set_card(if n > 0 { INSET + n as f32 * ROW_H + INSET } else { 0.0 });
         self.paint_card();
+        // The hint after the query names the selected row's action.
+        self.paint_field();
     }
 
     fn move_selection(&mut self, by: isize) {
@@ -759,22 +763,47 @@ impl Launcher {
 
     fn paint_field(&mut self) {
         let (scale, dark, caret) = (self.panel.scale, self.darkness(), self.caret);
+        // No icon for the plain search, as in Spotlight; a scope shows its icon before the query.
         let (icon, hint) = match self.scope {
-            Scope::All => (glyph::SEARCH, "Search apps and files"),
-            Scope::Apps => (glyph::APPS, "Search applications"),
-            Scope::Files => (glyph::FOLDER, "Search files by name"),
+            Scope::All => (None, "Search apps and files"),
+            Scope::Apps => (Some(glyph::APPS), "Search applications"),
+            Scope::Files => (Some(glyph::FOLDER), "Search files by name"),
         };
+        let enter = (!self.field.text().trim().is_empty()).then(|| self.enter_hint()).flatten();
         let field = &self.field;
         let mut at = None;
         self.panel.capsule.draw(scale, |c| {
             c.glass(dark);
-            c.glyph(icon, 20.0, EDGE + 2.0, 0.0, 28.0, c.h, SECONDARY);
-            let fmt = gfx().format(Font::Sans, 24.0, DWRITE_FONT_WEIGHT_NORMAL, false, false);
+            if let Some(icon) = icon {
+                c.glyph(icon, 20.0, EDGE + 2.0, 0.0, 28.0, c.h, SECONDARY);
+            }
+            let fmt = gfx().format(Font::Sans, QUERY, DWRITE_FONT_WEIGHT_NORMAL, false, false);
             at = Some(c.field(field, &fmt, TEXT_X, WIDTH - TEXT_X - EDGE, hint, caret));
+            // After the query, in grey, what Enter does: "– Open Notepad". Only while the query fits.
+            if let Some(h) = enter {
+                let hx = TEXT_X + gfx().width(field.text(), &fmt) + 12.0;
+                if hx + 80.0 <= WIDTH - EDGE {
+                    c.text(&format!("\u{2013} {h}"), &fmt, hx, 0.0, WIDTH - EDGE - hx, c.h, TERTIARY);
+                }
+            }
         });
         if let Some(at) = at {
             self.panel.set_caret(at);
         }
+    }
+
+    /// What Enter does with the selected row, for the hint after the query.
+    fn enter_hint(&self) -> Option<String> {
+        let item = self.items.get(self.selected)?;
+        let (title, _) = self.texts(item);
+        Some(match item {
+            Item::App(_) | Item::File(..) | Item::Settings | Item::Clipboard => format!("Open {title}"),
+            Item::Answer(_) => "Copy".into(),
+            Item::Quicklink(_) | Item::Command(_) | Item::Web(_) => title,
+            Item::Snippet(_) => "Type it".into(),
+            Item::Scope(t, _) => format!("Show {t}"),
+            Item::Indexing | Item::Empty => return None,
+        })
     }
 
     fn paint_card(&mut self) {
@@ -1003,6 +1032,7 @@ impl Launcher {
                             self.armed = None;
                             self.selected = i;
                             self.paint_card();
+                            self.paint_field();
                         }
                 }
                 Some(LRESULT(0))
