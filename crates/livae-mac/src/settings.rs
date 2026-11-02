@@ -639,8 +639,7 @@ pub fn refresh() {
             CHOICES.with(|c| *c.borrow_mut() = (o, i));
             eq.setState(if s.sound.eq { NSControlStateValueOn } else { NSControlStateValueOff });
             let status = crate::sound::status();
-            let line = if status == crate::sound::Status::Off { "A 10-band EQ, filters and a boost for each output".to_string() } else { status.text() };
-            eq_status.setStringValue(&NSString::from_str(&line));
+            eq_status.setStringValue(&NSString::from_str(&status.text()));
             eq_allow.setHidden(status != crate::sound::Status::NeedsPermission);
         }
     });
@@ -839,8 +838,10 @@ fn build(mtm: MainThreadMarker) {
     glass_help.setStringValue(ns_string!("Darker reads better over bright windows"));
     p.row("Glass", &[(&slider, VALUE_W, 24.0)], Some(&glass_help));
     p.group();
-    let welcome = button("Welcome…", sel!(openWelcome:));
-    p.row(concat!("Livae ", env!("CARGO_PKG_VERSION")), &[(&welcome, BUTTON_W, 28.0)], None);
+    let welcome = button("Show…", sel!(openWelcome:));
+    let version = help();
+    version.setStringValue(ns_string!(concat!("Livae ", env!("CARGO_PKG_VERSION"))));
+    p.row("Welcome", &[(&welcome, BUTTON_W, 28.0)], Some(&version));
     views.push(v);
 
     // Search: how many rows, where files are looked for, and what the empty search shows.
@@ -924,10 +925,13 @@ fn build(mtm: MainThreadMarker) {
     p.row("Microphone", &[(&inputs, VALUE_W, 28.0)], None);
     p.group();
     let eq = switch(s.sound.eq, sel!(eqToggled:));
-    let eq_edit = button("Edit…", sel!(editEq:));
     let eq_allow = button("Allow…", sel!(allowAudio:));
     let eq_status = help();
-    p.row("Equaliser", &[(&eq, 40.0, 22.0), (&eq_edit, BUTTON_W, 28.0), (&eq_allow, BUTTON_W, 28.0)], Some(&eq_status));
+    p.row("Equaliser", &[(&eq, 40.0, 22.0), (&eq_allow, BUTTON_W, 28.0)], Some(&eq_status));
+    let eq_edit = button("Edit…", sel!(editEq:));
+    let curves_help = help();
+    curves_help.setStringValue(ns_string!("A 10-band EQ, filters and a boost for each output"));
+    p.row("Curves", &[(&eq_edit, BUTTON_W, 28.0)], Some(&curves_help));
     views.push(v);
 
     // Text expansion: on or off, and the file that holds the snippets, quicklinks and command shortcuts.

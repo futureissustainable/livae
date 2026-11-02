@@ -124,6 +124,7 @@ pub fn menu(hwnd: HWND) -> u32 {
         // The text after a tab shows right-aligned, where menus show shortcuts.
         add(MF_STRING, SEARCH, &format!("Search\t{}", s.launcher));
         add(MF_STRING, CLIPBOARD, &format!("Clipboard\t{}", s.clipboard));
+        add(MF_STRING | if crate::clipboard::paused() { MF_CHECKED } else { MF_UNCHECKED }, PAUSE, "Pause clipboard history");
         if crate::hotkeys::taken() {
             add(MF_STRING | MF_GRAYED, 0, "A shortcut is in use by another app; retrying");
         }
@@ -159,7 +160,6 @@ pub fn menu(hwnd: HWND) -> u32 {
             sub(MF_STRING, EQ_EDIT, "Edit profiles\u{2026}");
             let _ = AppendMenuW(m, MF_POPUP, eq.0 as usize, w!("Equaliser"));
         }
-        add(MF_STRING | if crate::clipboard::paused() { MF_CHECKED } else { MF_UNCHECKED }, PAUSE, "Pause clipboard history");
         let _ = AppendMenuW(m, MF_SEPARATOR, 0, PCWSTR::null());
         add(MF_STRING, SETTINGS, "Settings");
         add(MF_STRING, QUIT, "Quit Livae");

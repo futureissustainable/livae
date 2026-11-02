@@ -395,13 +395,14 @@ fn start(mtm: MainThreadMarker, delegate: &AppDelegate) {
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
 
     let status = NSStatusBar::systemStatusBar().statusItemWithLength(NSVariableStatusItemLength);
-    // Four groups: open (search, clipboard), today (journal, year), what runs (breaks, equaliser, clipboard
-    // pause), the app. Each status sits under its item as a subtitle, never as a row of its own.
+    // Four groups: open (search, the clipboard and its pause), today (journal, year), what runs (breaks,
+    // equaliser), the app. Each status sits under its item as a subtitle, never as a row of its own.
     let menu = NSMenu::new(mtm);
     let search = icon_item(mtm, "Search", "magnifyingglass", Some(sel!(openLauncher:)), delegate);
     let clip = icon_item(mtm, "Clipboard", "doc.on.clipboard", Some(sel!(openClipboard:)), delegate);
     menu.addItem(&search);
     menu.addItem(&clip);
+    menu.addItem(&icon_item(mtm, "Pause Clipboard History", "pause.circle", Some(sel!(togglePause:)), delegate));
     let taken = icon_item(mtm, "A Shortcut Is Taken", "exclamationmark.triangle", Some(sel!(openSettings:)), delegate);
     taken.setSubtitle(Some(ns_string!("Another app uses it; choose another in Settings")));
     taken.setHidden(true);
@@ -438,7 +439,6 @@ fn start(mtm: MainThreadMarker, delegate: &AppDelegate) {
     eq_item.setSubmenu(Some(&eq_menu));
     menu.addItem(&eq_item);
     EQ_ITEMS.with(|e| *e.borrow_mut() = Some([eq_item.clone(), eq_toggle, eq_compare]));
-    menu.addItem(&icon_item(mtm, "Pause Clipboard History", "pause.circle", Some(sel!(togglePause:)), delegate));
     menu.setDelegate(Some(ProtocolObject::from_ref(delegate)));
     menu.addItem(&NSMenuItem::separatorItem(mtm));
     let settings = icon_item(mtm, "Settings…", "gearshape", Some(sel!(openSettings:)), delegate);
