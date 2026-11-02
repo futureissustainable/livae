@@ -48,6 +48,9 @@ pub enum Status {
     Running(String),
     /// macOS has not allowed Livae to hear what apps play (System Settings, Privacy, Screen & System Audio Recording).
     NeedsPermission,
+    /// This output also has a microphone (a headset, a USB DAC): macOS wants its permission before Livae plays
+    /// through it, though Livae keeps that microphone off.
+    NeedsMicrophone,
     Failed(String),
 }
 
@@ -58,6 +61,7 @@ impl Status {
             Status::Flat(d) => format!("Nothing to change on {d}"),
             Status::Running(d) => format!("On for {d}"),
             Status::NeedsPermission => "Needs permission to hear what apps play".into(),
+            Status::NeedsMicrophone => "This output has a microphone: macOS asks first (Livae keeps it off)".into(),
             Status::Failed(why) => why.clone(),
         }
     }
@@ -174,17 +178,27 @@ mod tcc {
         if lib == 0 { std::ptr::null_mut() } else { unsafe { dlsym(lib as *mut c_void, name.as_ptr()) } }
     }
 
-    fn service() -> Retained<NSString> {
-        NSString::from_str("kTCCServiceAudioCapture")
+    /// What Livae needs: hearing what apps play, and for an output that has a microphone, the microphone.
+    #[derive(Clone, Copy, PartialEq)]
+    pub enum Service {
+        AudioCapture,
+        Microphone,
     }
 
-    pub fn preflight() -> Access {
+    fn service(s: Service) -> Retained<NSString> {
+        NSString::from_str(match s {
+            Service::AudioCapture => "kTCCServiceAudioCapture",
+            Service::Microphone => "kTCCServiceMicrophone",
+        })
+    }
+
+    pub fn preflight(s: Service) -> Access {
         let f = symbol(c"TCCAccessPreflight");
         if f.is_null() {
             return Access::Unknown;
         }
         let f: extern "C" fn(*const c_void, *const c_void) -> c_int = unsafe { std::mem::transmute(f) };
-        match f(Retained::as_ptr(&service()) as *const c_void, std::ptr::null()) {
+        match f(Retained::as_ptr(&service(s)) as *const c_void, std::ptr::null()) {
             0 => Access::Granted,
             1 => Access::Denied,
             _ => Access::Unknown,
@@ -192,7 +206,7 @@ mod tcc {
     }
 
     /// Ask (macOS shows its prompt once); `done` runs on the main thread with the answer.
-    pub fn request(done: fn(bool)) {
+    pub fn request(s: Service, done: fn(bool)) {
         let f = symbol(c"TCCAccessRequest");
         if f.is_null() {
             return;
@@ -201,7 +215,7 @@ mod tcc {
         let block = RcBlock::new(move |granted: u8| {
             DispatchQueue::main().exec_async(move || done(granted != 0));
         });
-        f(Retained::as_ptr(&service()) as *const c_void, std::ptr::null(), &*block as *const _ as *const c_void);
+        f(Retained::as_ptr(&service(s)) as *const c_void, std::ptr::null(), &*block as *const _ as *const c_void);
     }
 }
 
@@ -441,13 +455,14 @@ struct State {
     status: Status,
     /// The device whose start failed, not tried again until something changes.
     failed: Option<AudioObjectID>,
-    asked: bool,
+    /// Asked this run: hearing apps, the microphone.
+    asked: [bool; 2],
     listeners: Vec<Listener>,
     woke: Option<Retained<objc2::runtime::ProtocolObject<dyn objc2::runtime::NSObjectProtocol>>>,
 }
 
 thread_local! {
-    static STATE: RefCell<State> = const { RefCell::new(State { engine: None, status: Status::Off, failed: None, asked: false, listeners: Vec::new(), woke: None }) };
+    static STATE: RefCell<State> = const { RefCell::new(State { engine: None, status: Status::Off, failed: None, asked: [false; 2], listeners: Vec::new(), woke: None }) };
     /// A refresh is already on its way (Core Audio sends changes in bursts).
     static PENDING: Cell<bool> = const { Cell::new(false) };
     /// Livae's recent switches of the output and the microphone, and until when it stands down from fighting.
@@ -538,14 +553,8 @@ pub fn refresh() {
         }
     }
     // Ask for the permission as soon as the equaliser has something to do on any output, not only this one.
-    if settings.eq && !settings.profiles.is_empty() && tcc::preflight() == tcc::Access::Unknown && std::env::var_os("LIVAE_TEST_EQ_DEVICE").is_none() {
-        STATE.with(|s| {
-            let mut s = s.borrow_mut();
-            if !s.asked {
-                s.asked = true;
-                tcc::request(|_granted| schedule());
-            }
-        });
+    if settings.eq && !settings.profiles.is_empty() && tcc::preflight(tcc::Service::AudioCapture) == tcc::Access::Unknown && std::env::var_os("LIVAE_TEST_EQ_DEVICE").is_none() {
+        ask(tcc::Service::AudioCapture);
     }
     // A check can run the equaliser on a named device (BlackHole) while the real output plays on untouched.
     let test_device = std::env::var("LIVAE_TEST_EQ_DEVICE").ok().filter(|_| crate::app::test_mode());
@@ -573,10 +582,26 @@ pub fn refresh() {
                 return;
             }
         };
-        if tcc::preflight() != tcc::Access::Granted {
+        if tcc::preflight(tcc::Service::AudioCapture) != tcc::Access::Granted {
             st.engine = None;
             st.status = Status::NeedsPermission;
             return;
+        }
+        // An output with a microphone joins Livae's private device whole, and macOS checks the microphone's
+        // permission for it (Livae switches that microphone off for itself; nothing is recorded).
+        if device.input {
+            match tcc::preflight(tcc::Service::Microphone) {
+                tcc::Access::Granted => {}
+                access => {
+                    st.engine = None;
+                    st.status = Status::NeedsMicrophone;
+                    if access == tcc::Access::Unknown && test_device.is_none() {
+                        drop(st);
+                        ask(tcc::Service::Microphone);
+                    }
+                    return;
+                }
+            }
         }
         if let Some(e) = st.engine.as_mut().filter(|e| e.device == device.id) {
             e.retune(&design);
@@ -602,6 +627,18 @@ pub fn refresh() {
         }
     });
     crate::settings::sound_changed();
+}
+
+/// Ask macOS once per run for a permission; refresh with the answer.
+fn ask(service: tcc::Service) {
+    let first = STATE.with(|s| {
+        let mut s = s.borrow_mut();
+        let i = usize::from(service == tcc::Service::Microphone);
+        !std::mem::replace(&mut s.asked[i], true)
+    });
+    if first {
+        tcc::request(service, |_granted| schedule());
+    }
 }
 
 /// Three seconds after a start, Core Audio must be calling the equaliser; if not, stand down (the device plays

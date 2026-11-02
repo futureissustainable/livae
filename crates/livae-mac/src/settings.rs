@@ -409,10 +409,11 @@ define_class!(
             crate::equalizer::show();
         }
 
-        /// Screen & System Audio Recording, where macOS lets Livae hear what apps play.
+        /// The privacy pane the equaliser waits on: hearing what apps play, or the output's microphone.
         #[unsafe(method(allowAudio:))]
         fn allow_audio(&self, _s: Option<&AnyObject>) {
-            if let Some(url) = objc2_foundation::NSURL::URLWithString(ns_string!("x-apple.systempreferences:com.apple.preference.security?Privacy_AudioCapture")) {
+            let pane = if crate::sound::status() == crate::sound::Status::NeedsMicrophone { "Privacy_Microphone" } else { "Privacy_AudioCapture" };
+            if let Some(url) = objc2_foundation::NSURL::URLWithString(&NSString::from_str(&format!("x-apple.systempreferences:com.apple.preference.security?{pane}"))) {
                 objc2_app_kit::NSWorkspace::sharedWorkspace().openURL(&url);
             }
         }
@@ -640,7 +641,7 @@ pub fn refresh() {
             eq.setState(if s.sound.eq { NSControlStateValueOn } else { NSControlStateValueOff });
             let status = crate::sound::status();
             eq_status.setStringValue(&NSString::from_str(&status.text()));
-            eq_allow.setHidden(status != crate::sound::Status::NeedsPermission);
+            eq_allow.setHidden(!matches!(status, crate::sound::Status::NeedsPermission | crate::sound::Status::NeedsMicrophone));
         }
     });
 }

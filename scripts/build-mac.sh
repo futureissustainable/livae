@@ -33,6 +33,7 @@ cat > "$APP.new/Contents/Info.plist" <<PLIST
   <key>NSHighResolutionCapable</key><true/>
   <key>ATSApplicationFontsPath</key><string>Fonts</string>
   <key>NSAudioCaptureUsageDescription</key><string>Livae plays what apps send to your output through your equaliser.</string>
+  <key>NSMicrophoneUsageDescription</key><string>This output also has a microphone. Livae keeps it off and records nothing; macOS asks before Livae can play your equaliser through it.</string>
 </dict></plist>
 PLIST
 if [ $PACKAGE = 1 ]; then
