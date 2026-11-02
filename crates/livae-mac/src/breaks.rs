@@ -181,9 +181,10 @@ define_class!(
     struct BreakPanel;
 
     impl BreakPanel {
+        /// Never in an offscreen test copy: it must not take the owner's typing.
         #[unsafe(method(canBecomeKeyWindow))]
         fn can_become_key_window(&self) -> bool {
-            true
+            !crate::app::offscreen()
         }
 
         /// Esc skips a break that may be skipped; a strict break ignores it. Other keys stop here.
@@ -479,7 +480,7 @@ fn notice(seconds: u32, long: bool) {
         n.panel.setFrame_display(NSRect::new(origin, NSSize::new(w, NOTICE_H)), true);
         if !shown {
             n.panel.orderFrontRegardless();
-            crate::motion::show(&n.panel, crate::motion::POP);
+            crate::motion::show(&n.panel, crate::motion::Kind::Bloom);
         }
         n.ticket += 1;
         Some(n.ticket)
@@ -498,7 +499,7 @@ fn hide_notice() {
         if let Some(n) = c.borrow_mut().as_mut() {
             n.ticket += 1;
             if crate::motion::shown(&n.panel) {
-                crate::motion::hide(&n.panel, crate::motion::SHRINK);
+                crate::motion::hide(&n.panel, crate::motion::Kind::Bloom);
             }
         }
     });

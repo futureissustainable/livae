@@ -319,7 +319,7 @@ impl Launcher {
         self.panel.setFrameOrigin(NSPoint::new(x, self.top - FIELD_H));
         self.query_changed();
         ui::present(&self.panel);
-        crate::motion::show(&self.panel, crate::motion::DROP);
+        crate::motion::drop_in(&self.panel, &self.parts(), crate::motion::SEARCH);
         self.panel.makeFirstResponder(Some(&self.field));
         self.paint_field();
     }
@@ -361,7 +361,7 @@ impl Launcher {
     pub fn hide(&mut self) {
         if crate::motion::shown(&self.panel) {
             self.generation.fetch_add(1, Ordering::SeqCst);
-            crate::motion::hide(&self.panel, crate::motion::SHRINK);
+            crate::motion::drop_out(&self.panel, &self.parts());
         }
     }
 
@@ -495,6 +495,15 @@ impl Launcher {
         }
         let f = self.field.frame();
         self.field.setFrame(NSRect::new(NSPoint::new(FIELD_X, f.origin.y), NSSize::new(WIDTH - FIELD_X - EDGE - 8.0, f.size.height)));
+    }
+
+    /// What moves when the search comes and goes: the capsule, the card, and each row on screen.
+    fn parts(&self) -> crate::motion::Parts {
+        use objc2::Message;
+        let rows = self.rows.iter().filter(|r| !r.title.isHidden()).map(|r| {
+            [&*r.icon as &NSView, &r.title, &r.detail, &r.hint].into_iter().map(|v| v.retain()).collect()
+        });
+        crate::motion::Parts { capsule: self.capsule.root.clone(), card: self.card.root.clone(), rows: rows.collect() }
     }
 
     /// What Enter does with the selected row, for the hint after the query.

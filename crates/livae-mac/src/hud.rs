@@ -69,7 +69,7 @@ pub fn show(text: &str, at: NSPoint) {
         let was = crate::motion::shown(&hud.panel);
         hud.panel.orderFrontRegardless();
         if !was {
-            crate::motion::show(&hud.panel, crate::motion::POP);
+            crate::motion::show(&hud.panel, crate::motion::Kind::Bloom);
         }
         // A confirmation never takes a click from the app below.
         hud.panel.setIgnoresMouseEvents(true);
@@ -81,7 +81,7 @@ pub fn show(text: &str, at: NSPoint) {
         HUD.with(|h| {
             if let Some(hud) = h.borrow().as_ref()
                 && hud.shown == ticket {
-                    crate::motion::hide(&hud.panel, crate::motion::SHRINK);
+                    crate::motion::hide(&hud.panel, crate::motion::Kind::Bloom);
                 }
         });
     });

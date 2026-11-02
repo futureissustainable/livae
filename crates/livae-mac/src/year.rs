@@ -177,9 +177,10 @@ define_class!(
     struct YearPanel;
 
     impl YearPanel {
+        /// Never in an offscreen test copy: it must not take the owner's typing.
         #[unsafe(method(canBecomeKeyWindow))]
         fn can_become_key_window(&self) -> bool {
-            true
+            !crate::app::offscreen()
         }
     }
 );
@@ -883,7 +884,7 @@ fn close() {
     STATE.with(|s| s.borrow_mut().hover = None);
     with_ui(|u| {
         u.card.orderOut(None);
-        crate::motion::hide(&u.window, crate::motion::SHRINK);
+        crate::motion::hide(&u.window, crate::motion::Kind::Bloom);
     });
 }
 
@@ -912,7 +913,7 @@ pub fn show() {
         let y = vf.origin.y + ((vf.size.height - H) / 2.0).max(0.0);
         u.window.setFrame_display(rect(x.round(), y.round(), W, H), true);
         ui::present(&u.window);
-        crate::motion::show(&u.window, crate::motion::RISE);
+        crate::motion::show(&u.window, crate::motion::Kind::Bloom);
     });
     // A menu-bar app must come forward, or the window gives up the keyboard at once and closes.
     if !crate::app::offscreen() {

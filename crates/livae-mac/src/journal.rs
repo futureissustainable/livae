@@ -270,9 +270,10 @@ define_class!(
     struct Prompt;
 
     impl Prompt {
+        /// Never in an offscreen test copy: it must not take the owner's typing.
         #[unsafe(method(canBecomeKeyWindow))]
         fn can_become_key_window(&self) -> bool {
-            true
+            !crate::app::offscreen()
         }
 
         /// An accessory app has no Edit menu: ⌘A/C/V/X/Z are routed to the text by hand, as panel.rs does.
@@ -1006,8 +1007,8 @@ impl Ui {
             self.window.makeKeyAndOrderFront(None);
         }
         if !was {
-            crate::motion::show(&self.backdrop, crate::motion::FADE);
-            crate::motion::show(&self.window, crate::motion::RISE);
+            crate::motion::show(&self.backdrop, crate::motion::Kind::Fade);
+            crate::motion::show(&self.window, crate::motion::Kind::Bloom);
         }
         let note: &NSResponder = &self.note;
         self.window.makeFirstResponder(Some(note));
@@ -1031,8 +1032,8 @@ impl Ui {
             t.invalidate();
         }
         self.backdrop.removeChildWindow(&self.window);
-        crate::motion::hide(&self.window, crate::motion::SHRINK);
-        crate::motion::hide(&self.backdrop, crate::motion::FADE);
+        crate::motion::hide(&self.window, crate::motion::Kind::Bloom);
+        crate::motion::hide(&self.backdrop, crate::motion::Kind::Fade);
     }
 
     /// The keyboard order follows the page: the rating (on its chosen day, or the first; arrows move inside

@@ -48,10 +48,11 @@ define_class!(
     pub struct Panel;
 
     impl Panel {
-        /// Not while it fades out (it lets clicks through then), so the keyboard stays with the app below.
+        /// Not while it fades out (it lets clicks through then), so the keyboard stays with the app below; never in an
+        /// offscreen test copy, which must not take the owner's typing (02.11.2026: a check caught keystrokes).
         #[unsafe(method(canBecomeKeyWindow))]
         fn can_become_key_window(&self) -> bool {
-            !self.ignoresMouseEvents()
+            !self.ignoresMouseEvents() && !crate::app::offscreen()
         }
 
         #[unsafe(method(performKeyEquivalent:))]

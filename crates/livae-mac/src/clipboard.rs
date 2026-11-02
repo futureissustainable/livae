@@ -376,9 +376,18 @@ impl Clipboard {
         let above = self.place();
         ui::present(&self.panel);
         // It grows out of the text cursor: from its top edge when it opens below the cursor, else from its bottom.
-        crate::motion::show(&self.panel, crate::motion::Pose::new(0.94, 0.0, (0.5, if above { 0.0 } else { 1.0 })));
+        crate::motion::drop_in(&self.panel, &self.parts(), crate::motion::at_caret(above));
         self.panel.makeFirstResponder(Some(&self.field));
         self.caret.place(&self.field);
+    }
+
+    /// What moves when the clipboard comes and goes: the capsule, the card, and each row on screen.
+    fn parts(&self) -> crate::motion::Parts {
+        use objc2::Message;
+        let rows = self.rows.iter().take(self.slots.len()).map(|r| {
+            [&*r.thumb as &NSView, &r.swatch, &r.title, &r.detail, &r.time, &r.pin].into_iter().map(|v| v.retain()).collect()
+        });
+        crate::motion::Parts { capsule: self.capsule.root.clone(), card: self.card.root.clone(), rows: rows.collect() }
     }
 
     /// The caret moved without a text change (arrow keys, a click in the field).
@@ -390,7 +399,7 @@ impl Clipboard {
 
     pub fn hide(&mut self) {
         if crate::motion::shown(&self.panel) {
-            crate::motion::hide(&self.panel, crate::motion::SHRINK);
+            crate::motion::drop_out(&self.panel, &self.parts());
         }
     }
 

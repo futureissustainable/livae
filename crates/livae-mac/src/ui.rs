@@ -110,6 +110,12 @@ define_class!(
             }
             unsafe { msg_send![super(self), constrainFrameRect: frame, toScreen: screen] }
         }
+
+        /// Never in an offscreen test copy: it must not take the owner's typing.
+        #[unsafe(method(canBecomeKeyWindow))]
+        fn can_become_key_window(&self) -> bool {
+            !crate::app::offscreen()
+        }
     }
 );
 

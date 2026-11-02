@@ -90,15 +90,11 @@ define_class!(
         #[unsafe(method(windowShouldClose:))]
         fn window_should_close(&self, sender: &NSWindow) -> bool {
             finish_recording(None);
-            let view = sender.contentView();
-            match view {
-                Some(view) => crate::motion::exit(sender, &view, crate::motion::SHRINK, || {
-                    if let Some(mtm) = MainThreadMarker::new() {
-                        NSApplication::sharedApplication(mtm).hide(None);
-                    }
-                }),
-                None => sender.orderOut(None),
-            }
+            crate::motion::hide_then(sender, crate::motion::Kind::Bloom, || {
+                if let Some(mtm) = MainThreadMarker::new() {
+                    NSApplication::sharedApplication(mtm).hide(None);
+                }
+            });
             false
         }
     }
@@ -486,7 +482,7 @@ pub fn show() {
                     scroll.reflectScrolledClipView(&scroll.contentView());
                 }
             crate::ui::present(&ui.window);
-            crate::motion::show(&ui.window, crate::motion::RISE);
+            crate::motion::show(&ui.window, crate::motion::Kind::Bloom);
         }
     });
     if !crate::app::offscreen() {
