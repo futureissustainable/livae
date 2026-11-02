@@ -1,5 +1,6 @@
-//! The Settings window: shortcuts (recorded by pressing them), glass, clipboard behaviour, file-search folders,
-//! open at login. Every change is saved at once and applied live.
+//! The Settings window: a sidebar of seven panes (General, Search, Clipboard, Breaks, Journal, Sound, Expansion),
+//! each one column of rows: the label, its help or status under it, its controls on one right edge. Every pane
+//! fits without scrolling. Every change is saved at once and applied live.
 
 use std::cell::{Cell, RefCell};
 use std::ptr::NonNull;
@@ -11,7 +12,7 @@ use objc2::{define_class, msg_send, sel, MainThreadOnly};
 use objc2_app_kit::{
     NSAppearance, NSAppearanceCustomization, NSAppearanceNameDarkAqua, NSApplication, NSButton, NSColor, NSControlStateValueOff,
     NSControlStateValueOn, NSEvent, NSEventMask, NSEventModifierFlags, NSLineBreakMode, NSOpenPanel, NSPopUpButton, NSSlider, NSSwitch,
-    NSTextAlignment, NSTextField, NSView, NSWindow, NSWindowTitleVisibility, NSScrollView, NSScreen,
+    NSTextAlignment, NSTextField, NSView, NSWindow, NSWindowTitleVisibility,
 };
 use objc2::runtime::ProtocolObject;
 use objc2_app_kit::{NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSWindowDelegate};
@@ -21,13 +22,33 @@ use crate::config;
 use crate::glass::Glass;
 use livae_core::tokens;
 
-const W: f64 = 560.0;
+const W: f64 = 720.0;
+const H: f64 = 480.0;
 const PAD: f64 = 24.0;
 const ROW: f64 = 44.0;
-/// Room for the window's traffic lights above the title.
+/// A row with its help line under the label.
+const ROW_HELP: f64 = 62.0;
+/// Between groups of rows: more than inside a group, so space shows what belongs together.
+const GROUP: f64 = 24.0;
+/// Room for the window's traffic lights above the sidebar and the title.
 const TITLEBAR: f64 = 44.0;
-/// Space a section header takes; larger than a row gap so sections read as groups.
-const SECTION: f64 = 40.0;
+const SIDEBAR: f64 = 196.0;
+/// The content column: from after the sidebar to the window's edge, less the padding.
+const CX: f64 = SIDEBAR + PAD;
+const CW: f64 = W - CX - PAD;
+/// Every control ends on this edge; a second button sits one fixed button width further in.
+const BUTTON_W: f64 = 104.0;
+const POPUP_W: f64 = 176.0;
+/// The panes: id, title, SF Symbol.
+const PANES: [(&str, &str, &str); 7] = [
+    ("general", "General", "gearshape"),
+    ("search", "Search", "magnifyingglass"),
+    ("clipboard", "Clipboard", "doc.on.clipboard"),
+    ("breaks", "Breaks", "cup.and.saucer"),
+    ("journal", "Journal", "book"),
+    ("sound", "Sound", "speaker.wave.2"),
+    ("expansion", "Text Expansion", "character.cursor.ibeam"),
+];
 const HISTORY: [usize; 4] = [100, 500, 1000, 5000];
 const RESULTS: [u32; 7] = [5, 6, 7, 8, 9, 10, 12];
 const BREAK_EVERY: [u32; 5] = [15, 20, 30, 45, 60];
@@ -64,8 +85,9 @@ struct Ui {
     eq: Retained<NSSwitch>,
     eq_status: Retained<NSTextField>,
     eq_allow: Retained<NSButton>,
-    /// The scroll view when the content is taller than the screen; every open starts at the top.
-    scroll: Option<Retained<NSScrollView>>,
+    /// Each pane's view and its sidebar button; the selection fill behind the chosen one.
+    panes: Vec<(Retained<NSView>, Retained<NSButton>)>,
+    selection: Retained<NSView>,
     _target: Retained<Target>,
     _monitor: Option<Retained<AnyObject>>,
 }
@@ -352,6 +374,18 @@ define_class!(
             }
         }
 
+        #[unsafe(method(paneChosen:))]
+        fn pane_chosen(&self, sender: Option<&AnyObject>) {
+            if let Some(b) = sender.and_then(|s| s.downcast_ref::<NSButton>()) {
+                show_pane(PANES.get(b.tag() as usize).map(|p| p.0).unwrap_or("general"));
+            }
+        }
+
+        #[unsafe(method(openWelcome:))]
+        fn open_welcome(&self, _s: Option<&AnyObject>) {
+            crate::welcome::show();
+        }
+
         #[unsafe(method(loginToggled:))]
         fn login_toggled(&self, sender: Option<&AnyObject>) {
             if let Some(sw) = sender.and_then(|s| s.downcast_ref::<NSSwitch>()) {
@@ -571,12 +605,29 @@ pub fn refresh() {
     });
 }
 
-/// The window's panes, for `--design-dump` (one page today).
+/// The window's panes by id, for `--design-dump`.
 pub fn panes() -> Vec<&'static str> {
-    vec!["all"]
+    PANES.iter().map(|p| p.0).collect()
 }
 
-pub fn show_pane(_pane: &str) {}
+/// Show one pane (by id) and mark it in the sidebar; builds the window if needed.
+pub fn show_pane(pane: &str) {
+    if UI.with(|u| u.borrow().is_none()) {
+        build(MainThreadMarker::new().unwrap());
+        refresh();
+    }
+    let chosen = PANES.iter().position(|p| p.0 == pane).unwrap_or(0);
+    UI.with(|u| {
+        if let Some(ui) = u.borrow().as_ref() {
+            for (i, (view, button)) in ui.panes.iter().enumerate() {
+                view.setHidden(i != chosen);
+                if i == chosen {
+                    ui.selection.setFrame(button.frame());
+                }
+            }
+        }
+    });
+}
 
 pub fn window() -> Option<Retained<NSWindow>> {
     UI.with(|u| u.borrow().as_ref().map(|ui| ui.window.clone()))
@@ -600,14 +651,6 @@ pub fn show() {
     UI.with(|u| {
         if let Some(ui) = u.borrow().as_ref() {
             ui.window.center();
-            if let Some(scroll) = &ui.scroll
-                && let Some(doc) = scroll.documentView() {
-                    // A test copy can open it at the end, to check the last sections.
-                    let end = crate::app::test_mode() && std::env::var_os("LIVAE_TEST_SETTINGS_END").is_some();
-                    let top = if end { 0.0 } else { doc.frame().size.height - scroll.contentSize().height };
-                    scroll.contentView().scrollToPoint(NSPoint::new(0.0, top.max(0.0)));
-                    scroll.reflectScrolledClipView(&scroll.contentView());
-                }
             crate::ui::present(&ui.window);
             crate::motion::show(&ui.window, crate::motion::Kind::Bloom);
         }
@@ -618,22 +661,58 @@ pub fn show() {
     }
 }
 
+/// Lays out one pane top-down: rows of a label, its controls on the right edge, and an optional help line under
+/// the label at the column's full width.
+struct Pane<'a> {
+    mtm: MainThreadMarker,
+    view: &'a NSView,
+    top: f64,
+}
+
+impl Pane<'_> {
+    fn place(&self, v: &NSView, x: f64, top: f64, w: f64, h: f64) {
+        v.setFrame(NSRect::new(NSPoint::new(x, H - top - h), NSSize::new(w, h)));
+        self.view.addSubview(v);
+    }
+
+    fn title(&mut self, title: &str) {
+        let t = text(self.mtm, title, 20.0, tokens::color::dark::TEXT);
+        t.setFont(Some(&crate::font::sans(20.0, unsafe { objc2_app_kit::NSFontWeightMedium })));
+        self.place(&t, CX, self.top, CW, 28.0);
+        self.top += 28.0 + 16.0;
+    }
+
+    /// A row: `controls` (view, width, height) from the right edge inwards, `help` under the label.
+    fn row(&mut self, label: &str, controls: &[(&NSView, f64, f64)], help: Option<&NSTextField>) {
+        let mut right = CX + CW;
+        for (c, w, h) in controls {
+            self.place(c, right - w, self.top + (ROW - h) / 2.0, *w, *h);
+            right -= w + 8.0;
+        }
+        let l = text(self.mtm, label, 16.0, tokens::color::dark::TEXT);
+        l.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+        self.place(&l, CX, self.top + 11.0, right - CX - 8.0, 22.0);
+        match help {
+            Some(h) => {
+                h.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+                self.place(h, CX, self.top + 38.0, CW, 18.0);
+                self.top += ROW_HELP;
+            }
+            None => self.top += ROW,
+        }
+    }
+
+    fn group(&mut self) {
+        self.top += GROUP;
+    }
+}
+
 fn build(mtm: MainThreadMarker) {
     let s = config::get();
     let this = Target::alloc(mtm).set_ivars(());
     let target: Retained<Target> = unsafe { msg_send![super(this), init] };
     let tgt = Some(&*target as &AnyObject);
-    // Title, eight sections, the rows below them, the version line.
-    let breaks_rows = 4.0 * ROW + (ROW - 16.0);
-    let journal_rows = 2.0 * ROW + (ROW - 16.0);
-    let general_rows = ROW + ROW + (ROW - 12.0);
-    let sound_rows = 3.0 * ROW + (ROW - 12.0);
-    let rows = 2.0 * ROW + 2.0 * ROW + (ROW + (ROW - 12.0) + ROW + ROW + ROW + (ROW - 16.0)) + (ROW + (ROW - 16.0) + (ROW - 12.0) + ROW) + breaks_rows + journal_rows + sound_rows + general_rows;
-    // The title starts below the traffic lights (TITLEBAR).
-    let h = TITLEBAR + 28.0 + 8.0 * SECTION + rows + 16.0 + 18.0 + PAD;
-    // Taller than the screen: the same content in a scroll view, the window as tall as fits.
-    let fits = NSScreen::mainScreen(mtm).map(|m| m.visibleFrame().size.height - 60.0).unwrap_or(h).min(h);
-    let window = crate::ui::titled_window(mtm, NSSize::new(W, fits));
+    let window = crate::ui::titled_window(mtm, NSSize::new(W, H));
     unsafe { window.setReleasedWhenClosed(false) };
     window.setTitle(ns_string!("Livae Settings"));
     window.setTitlebarAppearsTransparent(true);
@@ -642,183 +721,44 @@ fn build(mtm: MainThreadMarker) {
     window.setBackgroundColor(Some(&NSColor::clearColor()));
     window.setAppearance(NSAppearance::appearanceNamed(unsafe { NSAppearanceNameDarkAqua }).as_deref());
     window.setMovableByWindowBackground(true);
-
     let glass = Glass::new(mtm, 0.0, s.glass.max(0.85));
     window.setContentView(Some(&glass.root));
-    let doc = NSView::initWithFrame(NSView::alloc(mtm), NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(W, h)));
-    let mut scroll_view = None;
-    if fits < h {
-        // The scroll view stops below the title bar, so rows never pass under the traffic lights; the document
-        // drops its own title-bar padding (nothing is laid out there).
-        doc.setFrameSize(NSSize::new(W, h - TITLEBAR));
-        let scroll = NSScrollView::initWithFrame(NSScrollView::alloc(mtm), NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(W, fits - TITLEBAR)));
-        scroll.setAutomaticallyAdjustsContentInsets(false);
-        scroll.setDrawsBackground(false);
-        scroll.setHasVerticalScroller(true);
-        scroll.setAutohidesScrollers(true);
-        // No autoresizing: the glass view starts at 100 x 100 and grows on the first layout, which would stretch
-        // the scroll view past the top of the window. The window never resizes, so a fixed frame is exact.
-        scroll.setDocumentView(Some(&doc));
-        glass.content.addSubview(&scroll);
-        scroll_view = Some(scroll);
-    } else {
-        glass.content.addSubview(&doc);
+    let root: &NSView = &glass.content;
+
+    // The sidebar: one row per pane, its symbol and name; the chosen one sits on a quiet fill.
+    let selection = NSView::initWithFrame(NSView::alloc(mtm), NSRect::ZERO);
+    selection.setWantsLayer(true);
+    if let Some(layer) = selection.layer() {
+        layer.setBackgroundColor(Some(&crate::ui::white(0.1).CGColor()));
+        layer.setCornerRadius(tokens::radius::CONTROL);
     }
-    let v: &NSView = &doc;
+    root.addSubview(&selection);
+    let mut buttons = Vec::new();
+    for (i, (_, title, symbol)) in PANES.iter().enumerate() {
+        let b = unsafe { NSButton::buttonWithTitle_target_action(&NSString::from_str(title), tgt, Some(sel!(paneChosen:)), mtm) };
+        b.setBordered(false);
+        b.setImage(crate::ui::symbol(symbol).as_deref());
+        b.setImagePosition(objc2_app_kit::NSCellImagePosition::ImageLeading);
+        b.setImageHugsTitle(true);
+        b.setAlignment(NSTextAlignment::Left);
+        b.setContentTintColor(Some(&rgb(tokens::color::dark::TEXT)));
+        b.setFont(Some(&crate::font::regular(16.0)));
+        b.setTag(i as isize);
+        b.setFrame(NSRect::new(NSPoint::new(12.0, H - TITLEBAR - 8.0 - (i as f64 + 1.0) * 36.0 + 4.0), NSSize::new(SIDEBAR - 24.0, 32.0)));
+        root.addSubview(&b);
+        buttons.push(b);
+    }
 
-    let mut y = h - TITLEBAR - 28.0;
-    let title = text(mtm, "Settings", 20.0, tokens::color::dark::TEXT);
-    title.setFont(Some(&crate::font::sans(20.0, unsafe { objc2_app_kit::NSFontWeightMedium })));
-    title.setFrame(NSRect::new(NSPoint::new(PAD, y), NSSize::new(200.0, 26.0)));
-    v.addSubview(&title);
-    let version = text(mtm, concat!("Livae ", env!("CARGO_PKG_VERSION")), 14.0, tokens::color::dark::TEXT_SECONDARY);
-    version.setFrame(NSRect::new(NSPoint::new(PAD, PAD), NSSize::new(200.0, 18.0)));
-    v.addSubview(&version);
-
-    let section = |name: &str, y: &mut f64| {
-        *y -= SECTION;
-        let t = text(mtm, name, 14.0, tokens::color::dark::TEXT);
-        t.setFont(Some(&crate::font::sans(14.0, unsafe { objc2_app_kit::NSFontWeightMedium })));
-        t.setFrame(NSRect::new(NSPoint::new(PAD, *y + 4.0), NSSize::new(300.0, 18.0)));
-        v.addSubview(&t);
+    let switch = |on: bool, action: objc2::runtime::Sel| {
+        let sw = NSSwitch::new(mtm);
+        sw.setState(if on { NSControlStateValueOn } else { NSControlStateValueOff });
+        unsafe {
+            sw.setTarget(tgt);
+            sw.setAction(Some(action));
+        }
+        sw
     };
-    let label_at = |s: &str, y: f64| {
-        let t = text(mtm, s, 16.0, tokens::color::dark::TEXT);
-        t.setFrame(NSRect::new(NSPoint::new(PAD, y + 11.0), NSSize::new(260.0, 22.0)));
-        v.addSubview(&t);
-    };
-    let right = |view: &NSView, width: f64, y: f64, height: f64| {
-        view.setFrame(NSRect::new(NSPoint::new(W - PAD - width, y + (ROW - height) / 2.0), NSSize::new(width, height)));
-        v.addSubview(view);
-    };
-
-    section("Shortcuts", &mut y);
-    y -= ROW;
-    label_at("Search", y);
-    let launcher = unsafe { NSButton::buttonWithTitle_target_action(&NSString::from_str(&s.launcher), tgt, Some(sel!(recordLauncher:)), mtm) };
-    right(&launcher, 180.0, y, 32.0);
-    y -= ROW;
-    label_at("Clipboard", y);
-    let clipboard = unsafe { NSButton::buttonWithTitle_target_action(&NSString::from_str(&s.clipboard), tgt, Some(sel!(recordClipboard:)), mtm) };
-    right(&clipboard, 180.0, y, 32.0);
-
-    section("Look", &mut y);
-    y -= ROW;
-    label_at("Glass", y);
-    let slider = unsafe { NSSlider::sliderWithValue_minValue_maxValue_target_action(s.glass, 0.0, 1.0, tgt, Some(sel!(glassChanged:)), mtm) };
-    slider.setContinuous(true);
-    right(&slider, 220.0, y, 24.0);
-    let clear = text(mtm, "Clear", 14.0, tokens::color::dark::TEXT_SECONDARY);
-    clear.setAlignment(NSTextAlignment::Right);
-    clear.setFrame(NSRect::new(NSPoint::new(W - PAD - 220.0 - 52.0, y + 14.0), NSSize::new(44.0, 16.0)));
-    v.addSubview(&clear);
-    let slider_frame = slider.frame();
-    slider.setFrame(NSRect::new(NSPoint::new(W - PAD - 220.0, slider_frame.origin.y), NSSize::new(180.0, slider_frame.size.height)));
-    let dark = text(mtm, "Dark", 14.0, tokens::color::dark::TEXT_SECONDARY);
-    dark.setFrame(NSRect::new(NSPoint::new(W - PAD - 32.0, y + 14.0), NSSize::new(36.0, 16.0)));
-    v.addSubview(&dark);
-    y -= ROW;
-    // How many results the search shows at once; the clipboard panel is the same size.
-    label_at("Results shown", y);
-    let results = NSPopUpButton::initWithFrame_pullsDown(NSPopUpButton::alloc(mtm), NSRect::ZERO, false);
-    for n in RESULTS {
-        results.addItemWithTitle(&NSString::from_str(&n.to_string()));
-    }
-    results.selectItemAtIndex(RESULTS.iter().position(|&n| n == s.results).unwrap_or(4) as isize);
-    unsafe {
-        results.setTarget(tgt);
-        results.setAction(Some(sel!(resultsChanged:)));
-    }
-    right(&results, 130.0, y, 28.0);
-
-    section("Clipboard", &mut y);
-    y -= ROW;
-    label_at("Paste into the app in front", y);
-    let paste = NSSwitch::new(mtm);
-    paste.setState(if s.paste { NSControlStateValueOn } else { NSControlStateValueOff });
-    unsafe {
-        paste.setTarget(tgt);
-        paste.setAction(Some(sel!(pasteToggled:)));
-    }
-    right(&paste, 40.0, y, 22.0);
-    y -= ROW - 12.0;
-    let paste_status = text(mtm, "", 14.0, tokens::color::dark::TEXT_SECONDARY);
-    paste_status.setFrame(NSRect::new(NSPoint::new(PAD, y + 14.0), NSSize::new(320.0, 18.0)));
-    v.addSubview(&paste_status);
-    let allow = unsafe { NSButton::buttonWithTitle_target_action(ns_string!("Allow…"), tgt, Some(sel!(allowAccessibility:)), mtm) };
-    right(&allow, 100.0, y, 28.0);
-    y -= ROW;
-    label_at("History size", y);
-    let keep = NSPopUpButton::initWithFrame_pullsDown(NSPopUpButton::alloc(mtm), NSRect::ZERO, false);
-    for n in HISTORY {
-        keep.addItemWithTitle(&NSString::from_str(&format!("{n} items")));
-    }
-    keep.selectItemAtIndex(HISTORY.iter().position(|&n| n == s.history).unwrap_or(1) as isize);
-    unsafe {
-        keep.setTarget(tgt);
-        keep.setAction(Some(sel!(historyChanged:)));
-    }
-    right(&keep, 130.0, y, 28.0);
-    let clear_btn = unsafe { NSButton::buttonWithTitle_target_action(ns_string!("Clear unpinned items…"), tgt, Some(sel!(clearHistory:)), mtm) };
-    y -= ROW;
-    right(&clear_btn, 170.0, y, 28.0);
-    let history_count = text(mtm, "", 14.0, tokens::color::dark::TEXT_SECONDARY);
-    history_count.setFrame(NSRect::new(NSPoint::new(PAD, y + 14.0), NSSize::new(260.0, 18.0)));
-    v.addSubview(&history_count);
-    y -= ROW;
-    label_at("Never record from", y);
-    let ignore_add = unsafe { NSButton::buttonWithTitle_target_action(ns_string!("Add…"), tgt, Some(sel!(addIgnored:)), mtm) };
-    right(&ignore_add, 80.0, y, 28.0);
-    let ignore_reset = unsafe { NSButton::buttonWithTitle_target_action(ns_string!("Reset"), tgt, Some(sel!(resetIgnored:)), mtm) };
-    ignore_reset.setFrame(NSRect::new(NSPoint::new(W - PAD - 80.0 - 8.0 - 80.0, y + 8.0), NSSize::new(80.0, 28.0)));
-    v.addSubview(&ignore_reset);
-    y -= ROW - 16.0;
-    let ignored = text(mtm, "", 14.0, tokens::color::dark::TEXT_SECONDARY);
-    ignored.setFrame(NSRect::new(NSPoint::new(PAD, y + 14.0), NSSize::new(W - 2.0 * PAD, 18.0)));
-    v.addSubview(&ignored);
-
-    section("Search", &mut y);
-    y -= ROW;
-    label_at("Search in", y);
-    let add = unsafe { NSButton::buttonWithTitle_target_action(ns_string!("Add…"), tgt, Some(sel!(addFolder:)), mtm) };
-    right(&add, 80.0, y, 28.0);
-    let reset = unsafe { NSButton::buttonWithTitle_target_action(ns_string!("Use Home only"), tgt, Some(sel!(resetFolders:)), mtm) };
-    reset.setFrame(NSRect::new(NSPoint::new(W - PAD - 80.0 - 8.0 - 130.0, y + 8.0), NSSize::new(130.0, 28.0)));
-    v.addSubview(&reset);
-    y -= ROW - 16.0;
-    let folders = text(mtm, "", 14.0, tokens::color::dark::TEXT_SECONDARY);
-    folders.setFrame(NSRect::new(NSPoint::new(PAD, y + 14.0), NSSize::new(W - 2.0 * PAD, 18.0)));
-    v.addSubview(&folders);
-    y -= ROW - 12.0;
-    let private_status = text(mtm, "", 14.0, tokens::color::dark::TEXT_SECONDARY);
-    private_status.setFrame(NSRect::new(NSPoint::new(PAD, y + 14.0), NSSize::new(340.0, 18.0)));
-    v.addSubview(&private_status);
-    let private_allow = unsafe { NSButton::buttonWithTitle_target_action(ns_string!("Allow…"), tgt, Some(sel!(allowFolders:)), mtm) };
-    right(&private_allow, 100.0, y, 28.0);
-    y -= ROW;
-    label_at("Show most used apps", y);
-    let recent = NSSwitch::new(mtm);
-    recent.setState(if s.recent_apps { NSControlStateValueOn } else { NSControlStateValueOff });
-    unsafe {
-        recent.setTarget(tgt);
-        recent.setAction(Some(sel!(recentToggled:)));
-    }
-    right(&recent, 40.0, y, 22.0);
-
-    section("Breaks", &mut y);
-    y -= ROW;
-    label_at("Break reminders", y);
-    let breaks_on = NSSwitch::new(mtm);
-    breaks_on.setState(if s.breaks.enabled { NSControlStateValueOn } else { NSControlStateValueOff });
-    unsafe {
-        breaks_on.setTarget(tgt);
-        breaks_on.setAction(Some(sel!(breaksToggled:)));
-    }
-    right(&breaks_on, 40.0, y, 22.0);
-    y -= ROW - 16.0;
-    let breaks_status = text(mtm, "", 14.0, tokens::color::dark::TEXT_SECONDARY);
-    breaks_status.setFrame(NSRect::new(NSPoint::new(PAD, y + 14.0), NSSize::new(W - 2.0 * PAD, 18.0)));
-    v.addSubview(&breaks_status);
+    let button = |title: &str, action: objc2::runtime::Sel| unsafe { NSButton::buttonWithTitle_target_action(&NSString::from_str(title), tgt, Some(action), mtm) };
     let popup = |items: Vec<String>, selected: usize, action: objc2::runtime::Sel| {
         let p = NSPopUpButton::initWithFrame_pullsDown(NSPopUpButton::alloc(mtm), NSRect::ZERO, false);
         for t in items {
@@ -831,46 +771,6 @@ fn build(mtm: MainThreadMarker) {
         }
         p
     };
-    y -= ROW;
-    label_at("Every", y);
-    let every = popup(BREAK_EVERY.iter().map(|m| format!("{m} min")).collect(), BREAK_EVERY.iter().position(|&m| m == s.breaks.mini_every_min).unwrap_or(1), sel!(breakEveryChanged:));
-    right(&every, 130.0, y, 28.0);
-    y -= ROW;
-    label_at("Length", y);
-    let length_label = |sec: u32| if sec < 60 { format!("{sec} s") } else { format!("{} min", sec / 60) };
-    let length = popup(BREAK_SECONDS.iter().map(|&sec| length_label(sec)).collect(), BREAK_SECONDS.iter().position(|&x| x == s.breaks.mini_seconds).unwrap_or(0), sel!(breakLengthChanged:));
-    right(&length, 130.0, y, 28.0);
-    y -= ROW;
-    label_at("Weekends off", y);
-    let weekends = NSSwitch::new(mtm);
-    weekends.setState(if s.breaks.weekends_off { NSControlStateValueOn } else { NSControlStateValueOff });
-    unsafe {
-        weekends.setTarget(tgt);
-        weekends.setAction(Some(sel!(weekendsToggled:)));
-    }
-    right(&weekends, 40.0, y, 22.0);
-
-    section("Journal", &mut y);
-    y -= ROW;
-    label_at("Evening journal", y);
-    let journal_on = NSSwitch::new(mtm);
-    journal_on.setState(if s.journal.enabled { NSControlStateValueOn } else { NSControlStateValueOff });
-    unsafe {
-        journal_on.setTarget(tgt);
-        journal_on.setAction(Some(sel!(journalToggled:)));
-    }
-    right(&journal_on, 40.0, y, 22.0);
-    y -= ROW - 16.0;
-    let journal_status = text(mtm, "", 14.0, tokens::color::dark::TEXT_SECONDARY);
-    journal_status.setFrame(NSRect::new(NSPoint::new(PAD, y + 14.0), NSSize::new(W - 2.0 * PAD, 18.0)));
-    v.addSubview(&journal_status);
-    y -= ROW;
-    label_at("Ask at", y);
-    let at = popup(JOURNAL_AT.iter().map(|t| t.to_string()).collect(), JOURNAL_AT.iter().position(|&t| t == s.journal.at).unwrap_or(2), sel!(journalAtChanged:));
-    right(&at, 130.0, y, 28.0);
-
-    // The output and microphone kept in use, and the equaliser on the output.
-    section("Sound", &mut y);
     let pulldown = |action: objc2::runtime::Sel| {
         let p = NSPopUpButton::initWithFrame_pullsDown(NSPopUpButton::alloc(mtm), NSRect::ZERO, true);
         unsafe {
@@ -879,56 +779,135 @@ fn build(mtm: MainThreadMarker) {
         }
         p
     };
-    y -= ROW;
-    label_at("Output", y);
-    let outputs = pulldown(sel!(outputPicked:));
-    right(&outputs, 260.0, y, 28.0);
-    y -= ROW;
-    label_at("Microphone", y);
-    let inputs = pulldown(sel!(inputPicked:));
-    right(&inputs, 260.0, y, 28.0);
-    y -= ROW;
-    label_at("Equaliser", y);
-    let eq = NSSwitch::new(mtm);
-    unsafe {
-        eq.setTarget(tgt);
-        eq.setAction(Some(sel!(eqToggled:)));
-    }
-    right(&eq, 40.0, y, 22.0);
-    y -= ROW - 12.0;
-    let eq_status = text(mtm, "", 14.0, tokens::color::dark::TEXT_SECONDARY);
-    eq_status.setFrame(NSRect::new(NSPoint::new(PAD, y + 14.0), NSSize::new(W - 2.0 * PAD - 220.0, 18.0)));
-    v.addSubview(&eq_status);
-    let eq_allow = unsafe { NSButton::buttonWithTitle_target_action(ns_string!("Allow…"), tgt, Some(sel!(allowAudio:)), mtm) };
-    eq_allow.setFrame(NSRect::new(NSPoint::new(W - PAD - 210.0, y + (ROW - 28.0) / 2.0), NSSize::new(100.0, 28.0)));
-    v.addSubview(&eq_allow);
-    let eq_edit = unsafe { NSButton::buttonWithTitle_target_action(ns_string!("Edit…"), tgt, Some(sel!(editEq:)), mtm) };
-    right(&eq_edit, 100.0, y, 28.0);
+    let help = || text(mtm, "", 14.0, tokens::color::dark::TEXT_SECONDARY);
+    let pane_view = || {
+        let v = NSView::initWithFrame(NSView::alloc(mtm), NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(W, H)));
+        root.addSubview(&v);
+        v
+    };
+    let mut views = Vec::new();
 
-    section("General", &mut y);
-    y -= ROW;
-    label_at("Open at login", y);
-    let login = NSSwitch::new(mtm);
-    unsafe {
-        login.setTarget(tgt);
-        login.setAction(Some(sel!(loginToggled:)));
-    }
-    right(&login, 40.0, y, 22.0);
-    y -= ROW;
-    label_at("Text expansion", y);
-    let expansion = NSSwitch::new(mtm);
-    expansion.setState(if s.expansion { NSControlStateValueOn } else { NSControlStateValueOff });
-    unsafe {
-        expansion.setTarget(tgt);
-        expansion.setAction(Some(sel!(expansionToggled:)));
-    }
-    right(&expansion, 40.0, y, 22.0);
-    y -= ROW - 12.0;
-    let expansion_status = text(mtm, "", 14.0, tokens::color::dark::TEXT_SECONDARY);
-    expansion_status.setFrame(NSRect::new(NSPoint::new(PAD, y + 14.0), NSSize::new(W - 2.0 * PAD - 110.0, 18.0)));
-    v.addSubview(&expansion_status);
-    let edit = unsafe { NSButton::buttonWithTitle_target_action(ns_string!("Edit file…"), tgt, Some(sel!(editFile:)), mtm) };
-    right(&edit, 100.0, y, 28.0);
+    // General: the two shortcuts, login, the glass, and Livae itself.
+    let v = pane_view();
+    let mut p = Pane { mtm, view: &v, top: TITLEBAR - 8.0 };
+    p.title("General");
+    let launcher = button(&s.launcher, sel!(recordLauncher:));
+    let clipboard = button(&s.clipboard, sel!(recordClipboard:));
+    p.row("Search shortcut", &[(&launcher, POPUP_W, 28.0)], None);
+    p.row("Clipboard shortcut", &[(&clipboard, POPUP_W, 28.0)], None);
+    p.group();
+    let login = switch(false, sel!(loginToggled:));
+    p.row("Open at login", &[(&login, 40.0, 22.0)], None);
+    let slider = unsafe { NSSlider::sliderWithValue_minValue_maxValue_target_action(s.glass, 0.0, 1.0, tgt, Some(sel!(glassChanged:)), mtm) };
+    slider.setContinuous(true);
+    let glass_help = help();
+    glass_help.setStringValue(ns_string!("From clear to black, for the search and the clipboard"));
+    p.row("Glass", &[(&slider, POPUP_W, 24.0)], Some(&glass_help));
+    p.group();
+    let welcome = button("Welcome…", sel!(openWelcome:));
+    p.row(concat!("Livae ", env!("CARGO_PKG_VERSION")), &[(&welcome, BUTTON_W, 28.0)], None);
+    views.push(v);
+
+    // Search: how many rows, where files are looked for, and what the empty search shows.
+    let v = pane_view();
+    let mut p = Pane { mtm, view: &v, top: TITLEBAR - 8.0 };
+    p.title("Search");
+    let results = popup(RESULTS.iter().map(|n| n.to_string()).collect(), RESULTS.iter().position(|&n| n == s.results).unwrap_or(4), sel!(resultsChanged:));
+    let results_help = help();
+    results_help.setStringValue(ns_string!("The clipboard shows as many"));
+    p.row("Results shown", &[(&results, POPUP_W, 28.0)], Some(&results_help));
+    let recent = switch(s.recent_apps, sel!(recentToggled:));
+    p.row("Show most used apps", &[(&recent, 40.0, 22.0)], None);
+    p.group();
+    let add = button("Add…", sel!(addFolder:));
+    let reset = button("Home Only", sel!(resetFolders:));
+    let folders = help();
+    p.row("Search in", &[(&add, BUTTON_W, 28.0), (&reset, BUTTON_W, 28.0)], Some(&folders));
+    let private_allow = button("Allow…", sel!(allowFolders:));
+    let private_status = help();
+    p.row("Desktop, Documents, Downloads", &[(&private_allow, BUTTON_W, 28.0)], Some(&private_status));
+    views.push(v);
+
+    // Clipboard: pasting, how much is kept, what is never recorded.
+    let v = pane_view();
+    let mut p = Pane { mtm, view: &v, top: TITLEBAR - 8.0 };
+    p.title("Clipboard");
+    let paste = switch(s.paste, sel!(pasteToggled:));
+    let allow = button("Allow…", sel!(allowAccessibility:));
+    let paste_status = help();
+    p.row("Paste into the app in front", &[(&paste, 40.0, 22.0), (&allow, BUTTON_W, 28.0)], Some(&paste_status));
+    p.group();
+    let keep = popup(HISTORY.iter().map(|n| format!("{n} items")).collect(), HISTORY.iter().position(|&n| n == s.history).unwrap_or(1), sel!(historyChanged:));
+    let clear_btn = button("Clear…", sel!(clearHistory:));
+    let history_count = help();
+    p.row("Keep", &[(&keep, POPUP_W, 28.0), (&clear_btn, BUTTON_W, 28.0)], Some(&history_count));
+    p.group();
+    let ignore_add = button("Add…", sel!(addIgnored:));
+    let ignore_reset = button("Reset", sel!(resetIgnored:));
+    let ignored = help();
+    p.row("Never record from", &[(&ignore_add, BUTTON_W, 28.0), (&ignore_reset, BUTTON_W, 28.0)], Some(&ignored));
+    views.push(v);
+
+    // Breaks.
+    let v = pane_view();
+    let mut p = Pane { mtm, view: &v, top: TITLEBAR - 8.0 };
+    p.title("Breaks");
+    let breaks_on = switch(s.breaks.enabled, sel!(breaksToggled:));
+    let breaks_status = help();
+    p.row("Break reminders", &[(&breaks_on, 40.0, 22.0)], Some(&breaks_status));
+    p.group();
+    let every = popup(BREAK_EVERY.iter().map(|m| format!("{m} min")).collect(), BREAK_EVERY.iter().position(|&m| m == s.breaks.mini_every_min).unwrap_or(1), sel!(breakEveryChanged:));
+    p.row("Every", &[(&every, POPUP_W, 28.0)], None);
+    let length_label = |sec: u32| if sec < 60 { format!("{sec} s") } else { format!("{} min", sec / 60) };
+    let length = popup(BREAK_SECONDS.iter().map(|&sec| length_label(sec)).collect(), BREAK_SECONDS.iter().position(|&x| x == s.breaks.mini_seconds).unwrap_or(0), sel!(breakLengthChanged:));
+    p.row("Length", &[(&length, POPUP_W, 28.0)], None);
+    let weekends = switch(s.breaks.weekends_off, sel!(weekendsToggled:));
+    p.row("Weekends off", &[(&weekends, 40.0, 22.0)], None);
+    views.push(v);
+
+    // Journal.
+    let v = pane_view();
+    let mut p = Pane { mtm, view: &v, top: TITLEBAR - 8.0 };
+    p.title("Journal");
+    let journal_on = switch(s.journal.enabled, sel!(journalToggled:));
+    let journal_status = help();
+    p.row("Evening journal", &[(&journal_on, 40.0, 22.0)], Some(&journal_status));
+    p.group();
+    let at = popup(JOURNAL_AT.iter().map(|t| t.to_string()).collect(), JOURNAL_AT.iter().position(|&t| t == s.journal.at).unwrap_or(2), sel!(journalAtChanged:));
+    p.row("Ask at", &[(&at, POPUP_W, 28.0)], None);
+    views.push(v);
+
+    // Sound: the devices kept in use, and the equaliser.
+    let v = pane_view();
+    let mut p = Pane { mtm, view: &v, top: TITLEBAR - 8.0 };
+    p.title("Sound");
+    let outputs = pulldown(sel!(outputPicked:));
+    let outputs_help = help();
+    outputs_help.setStringValue(ns_string!("The first one connected is always used"));
+    p.row("Output", &[(&outputs, POPUP_W + 64.0, 28.0)], Some(&outputs_help));
+    let inputs = pulldown(sel!(inputPicked:));
+    p.row("Microphone", &[(&inputs, POPUP_W + 64.0, 28.0)], None);
+    p.group();
+    let eq = switch(s.sound.eq, sel!(eqToggled:));
+    let eq_edit = button("Edit…", sel!(editEq:));
+    let eq_allow = button("Allow…", sel!(allowAudio:));
+    let eq_status = help();
+    p.row("Equaliser", &[(&eq, 40.0, 22.0), (&eq_edit, BUTTON_W, 28.0), (&eq_allow, BUTTON_W, 28.0)], Some(&eq_status));
+    views.push(v);
+
+    // Text expansion: on or off, and the file that holds the snippets, quicklinks and command shortcuts.
+    let v = pane_view();
+    let mut p = Pane { mtm, view: &v, top: TITLEBAR - 8.0 };
+    p.title("Text Expansion");
+    let expansion = switch(s.expansion, sel!(expansionToggled:));
+    let expansion_status = help();
+    p.row("Expand snippets as you type", &[(&expansion, 40.0, 22.0)], Some(&expansion_status));
+    p.group();
+    let edit = button("Edit…", sel!(editFile:));
+    let edit_help = help();
+    edit_help.setStringValue(ns_string!("Snippets, quicklinks and command shortcuts"));
+    p.row("Settings file", &[(&edit, BUTTON_W, 28.0)], Some(&edit_help));
+    views.push(v);
 
     // Shortcut recording: the next key press in this window becomes the shortcut; Esc cancels.
     let handler = RcBlock::new(|event: NonNull<NSEvent>| -> *mut NSEvent {
@@ -953,6 +932,11 @@ fn build(mtm: MainThreadMarker) {
 
     window.setDelegate(Some(ProtocolObject::from_ref(&*target)));
     UI.with(|u| {
-        *u.borrow_mut() = Some(Ui { window, glass, launcher, clipboard, paste_status, allow, folders, home_only: reset, ignored, ignore_reset, history_count, breaks_status, journal_status, private_status, private_allow, login, expansion, expansion_status, outputs, inputs, eq, eq_status, eq_allow, scroll: scroll_view, _target: target, _monitor: monitor })
+        *u.borrow_mut() = Some(Ui {
+            window, glass, launcher, clipboard, paste_status, allow, folders, home_only: reset, ignored, ignore_reset, history_count,
+            breaks_status, journal_status, private_status, private_allow, login, expansion, expansion_status, outputs, inputs, eq,
+            eq_status, eq_allow, panes: views.into_iter().zip(buttons).collect(), selection, _target: target, _monitor: monitor,
+        })
     });
+    show_pane("general");
 }
