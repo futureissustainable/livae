@@ -19,7 +19,7 @@ use objc2::{sel, MainThreadOnly};
 use livae_core::answers::Answer;
 use livae_core::commands::{Command, Def};
 use livae_core::quicklinks::{self, Hit};
-use livae_core::rows::{self, Extra};
+use livae_core::rows::{self, Extra, Own};
 use livae_core::search::rank_words_scored;
 use livae_core::settings::Platform;
 use objc2_app_kit::{
@@ -63,7 +63,8 @@ enum Scope {
 #[derive(Clone)]
 enum Item {
     Scope { title: &'static str, scope: Scope },
-    Clipboard,
+    /// One of Livae's own windows.
+    Own(Own),
     App(usize),
     File(PathBuf),
     /// Maths, units, money or the time somewhere; Enter copies it.
@@ -72,7 +73,6 @@ enum Item {
     Command(&'static Def),
     /// An index into the settings' snippets; Enter types it into the app in front.
     Snippet(usize),
-    Settings,
     /// Nothing local fits: search the web for the query.
     Web(String),
     /// macOS still hides Desktop, Documents and Downloads from file search: ask once.
@@ -524,7 +524,7 @@ impl Launcher {
             Item::Answer(_) => "Copy".into(),
             Item::Quick(_) | Item::Command(_) | Item::Web(_) => title,
             Item::Snippet(_) => "Type it".into(),
-            Item::Settings | Item::Clipboard => format!("Open {title}"),
+            Item::Own(_) => format!("Open {title}"),
             Item::Scope { title, .. } => format!("Show {title}"),
             Item::AllowFolders | Item::Searching | Item::Empty => return None,
         })
@@ -585,8 +585,8 @@ impl Launcher {
                     }
                     items.push(Item::Scope { title: "Applications", scope: Scope::Apps });
                     items.push(Item::Scope { title: "Files", scope: Scope::Files });
-                    items.push(Item::Clipboard);
-                    items.push(Item::Settings);
+                    items.push(Item::Own(Own::Clipboard));
+                    items.push(Item::Own(Own::Settings));
                 }
                 Scope::Apps => {
                     let mut by_use: Vec<usize> = (0..self.apps.len()).collect();
@@ -615,6 +615,7 @@ impl Launcher {
                     let extras = rows::extras(q, Platform::Mac, &s.quicklinks, &s.snippets, keyword_index, |name| usage.boost(name));
                     ranked.extend(extras.into_iter().map(|(sc, e)| {
                         (sc, match e {
+                            Extra::Own(o) => Item::Own(o),
                             Extra::Command(d) => Item::Command(d),
                             Extra::Quick(h) => Item::Quick(h),
                             Extra::Snippet(i) => Item::Snippet(i),
@@ -623,15 +624,6 @@ impl Launcher {
                 }
                 ranked.sort_by_key(|(sc, _)| std::cmp::Reverse(*sc));
                 items.extend(ranked.into_iter().map(|(_, item)| item));
-                if self.scope == Scope::All {
-                    let ql = q.to_lowercase();
-                    if "settings".starts_with(&ql) || "preferences".starts_with(&ql) {
-                        items.push(Item::Settings);
-                    }
-                    if "clipboard".starts_with(&ql) {
-                        items.push(Item::Clipboard);
-                    }
-                }
             }
             let file_cap = if self.scope == Scope::Files { MAX_ITEMS } else { 6 };
             items.extend(self.files.iter().take(file_cap).cloned().map(Item::File));
@@ -810,9 +802,15 @@ impl Launcher {
                     });
                 });
             }
-            Item::Clipboard => {
+            Item::Own(own) => {
                 self.hide();
-                crate::clipboard::show();
+                match own {
+                    Own::Settings => crate::settings::show(),
+                    Own::Clipboard => crate::clipboard::show(),
+                    Own::Equaliser => crate::equalizer::show(),
+                    Own::Journal => crate::journal::show(),
+                    Own::Year => crate::year::show(),
+                }
             }
             Item::App(i) => {
                 let app = &self.apps[i];
@@ -863,10 +861,6 @@ impl Launcher {
                 }
             }
             Item::Web(q) => self.open_url(&format!("https://www.google.com/search?q={}", quicklinks::encode(&q))),
-            Item::Settings => {
-                self.hide();
-                crate::settings::show();
-            }
             Item::Searching | Item::Empty => {}
         }
     }
@@ -888,7 +882,7 @@ impl Launcher {
     fn texts(&self, i: usize, item: &Item) -> (String, String) {
         match item {
             Item::Scope { title, .. } => (title.to_string(), String::new()),
-            Item::Clipboard => ("Clipboard".to_string(), String::new()),
+            Item::Own(o) => (o.name().to_string(), String::new()),
             Item::App(a) => (self.apps[*a].name.clone(), self.apps[*a].detail.to_string()),
             Item::File(p) => (
                 p.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default(),
@@ -907,7 +901,6 @@ impl Launcher {
                 (if short.len() < line.len() { format!("{short}…") } else { short }, x.trigger.clone())
             }
             Item::Web(_) => ("Search the web".to_string(), String::new()),
-            Item::Settings => ("Settings".to_string(), String::new()),
             Item::AllowFolders => ("Include Desktop, Documents and Downloads".to_string(), String::new()),
             Item::Searching => ("Searching files…".to_string(), String::new()),
             Item::Empty => (
@@ -997,6 +990,13 @@ impl Launcher {
                 Item::Quick(_) => Some("link"),
                 Item::Command(d) => Some(if matches!(d.command, Command::Window(_)) { "macwindow" } else { "power" }),
                 Item::Snippet(_) => Some("text.quote"),
+                Item::Own(o) => Some(match o {
+                    Own::Settings => "gearshape",
+                    Own::Clipboard => "doc.on.clipboard",
+                    Own::Equaliser => "slider.vertical.3",
+                    Own::Journal => "book",
+                    Own::Year => "calendar",
+                }),
                 _ => None,
             };
             let (image, template): (Option<Retained<NSImage>>, bool) = match &item {

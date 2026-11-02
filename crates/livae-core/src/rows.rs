@@ -1,5 +1,5 @@
-//! The launcher's own rows beside apps and files: commands, quicklinks and snippets that match the query, each with
-//! its match score, so each system merges them with its app rows in one order.
+//! The launcher's own rows beside apps and files: Livae's windows, commands, quicklinks and snippets that match the
+//! query, each with its match score, so each system merges them with its app rows in one order.
 
 use crate::commands::{self, Def};
 use crate::quicklinks::{self, Hit, Quicklink};
@@ -7,7 +7,45 @@ use crate::search::rank_words_scored;
 use crate::settings::Platform;
 use crate::snippets::Snippet;
 
+/// Livae's own windows: found by their names and by "livae", like any other row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Own {
+    Settings,
+    Clipboard,
+    Equaliser,
+    Journal,
+    Year,
+}
+
+impl Own {
+    pub fn name(self) -> &'static str {
+        match self {
+            Own::Settings => "Livae Settings",
+            Own::Clipboard => "Clipboard",
+            Own::Equaliser => "Equaliser",
+            Own::Journal => "Journal",
+            Own::Year => "Year View",
+        }
+    }
+
+    fn words(self) -> &'static str {
+        match self {
+            Own::Settings => "livae settings preferences options",
+            Own::Clipboard => "livae clipboard history copied paste",
+            Own::Equaliser => "livae equaliser equalizer eq sound audio boost headphones",
+            Own::Journal => "livae journal diary note mood habits",
+            Own::Year => "livae year view days mood habits calendar",
+        }
+    }
+
+    /// The ones this system has: on Windows the equaliser lives in the settings file, with no window of its own.
+    pub fn on(platform: Platform) -> impl Iterator<Item = Own> {
+        [Own::Settings, Own::Clipboard, Own::Equaliser, Own::Journal, Own::Year].into_iter().filter(move |o| *o != Own::Equaliser || platform == Platform::Mac)
+    }
+}
+
 pub enum Extra {
+    Own(Own),
     Command(&'static Def),
     Quick(Hit),
     /// An index into the snippets.
@@ -18,11 +56,13 @@ pub enum Extra {
 /// search ("gh livae"). `used` boosts a command by how often it ran; a typed-out command (3 letters or more) wins a
 /// tie with an app or a settings page of the same name ("Lock Screen").
 pub fn extras(q: &str, platform: Platform, links: &[Quicklink], snippets: &[Snippet], skip_link: Option<usize>, used: impl Fn(&str) -> u32) -> Vec<(u32, Extra)> {
+    let own: Vec<Own> = Own::on(platform).collect();
+    let own_names: Vec<(&str, &str)> = own.iter().map(|o| (o.name(), o.words())).collect();
+    let mut out: Vec<(u32, Extra)> = rank_words_scored(q, &own_names, |_| 0).into_iter().map(|(sc, i)| (sc, Extra::Own(own[i]))).collect();
     let defs: Vec<&'static Def> = commands::all(platform).collect();
     let names: Vec<(&str, &str)> = defs.iter().map(|d| (d.name, d.keywords)).collect();
     let edge = u32::from(q.trim().chars().count() >= 3);
-    let mut out: Vec<(u32, Extra)> =
-        rank_words_scored(q, &names, |i| edge + used(defs[i].name)).into_iter().take(4).map(|(sc, i)| (sc, Extra::Command(defs[i]))).collect();
+    out.extend(rank_words_scored(q, &names, |i| edge + used(defs[i].name)).into_iter().take(4).map(|(sc, i)| (sc, Extra::Command(defs[i]))));
     let found = rank_words_scored(q, &quicklinks::search_names(links), |_| 0).into_iter().filter(|&(_, i)| Some(i) != skip_link);
     out.extend(found.take(3).map(|(sc, i)| (sc, Extra::Quick(quicklinks::named_hit(i, &links[i])))));
     let snips: Vec<(&str, &str)> = snippets.iter().map(|s| (s.trigger.as_str(), s.text.as_str())).collect();
@@ -41,6 +81,7 @@ mod tests {
             extras(q, Platform::Mac, &links, &snippets, skip, |_| 0)
                 .into_iter()
                 .map(|(_, e)| match e {
+                    Extra::Own(o) => o.name(),
                     Extra::Command(d) => d.id,
                     Extra::Quick(_) => "link",
                     Extra::Snippet(_) => "snippet",
@@ -52,5 +93,21 @@ mod tests {
         assert!(!kinds("github", Some(1)).contains(&"link"));
         assert!(kinds("shrug", None).contains(&"snippet"));
         assert!(kinds("left", None).len() <= 10);
+    }
+
+    #[test]
+    fn livae_finds_its_own_windows() {
+        let own = |q: &str, p| -> Vec<&'static str> {
+            extras(q, p, &[], &[], None, |_| 0).into_iter().filter_map(|(_, e)| if let Extra::Own(o) = e { Some(o.name()) } else { None }).collect()
+        };
+        let sorted = |mut v: Vec<&'static str>| {
+            v.sort();
+            v
+        };
+        assert_eq!(own("livae", Platform::Mac)[0], "Livae Settings");
+        assert_eq!(sorted(own("livae", Platform::Mac)), ["Clipboard", "Equaliser", "Journal", "Livae Settings", "Year View"]);
+        assert_eq!(sorted(own("livae", Platform::Windows)), ["Clipboard", "Journal", "Livae Settings", "Year View"]);
+        assert_eq!(own("settings", Platform::Mac).first(), Some(&"Livae Settings"));
+        assert!(own("eq", Platform::Mac).contains(&"Equaliser"));
     }
 }

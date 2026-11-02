@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use livae_core::commands;
 use livae_core::field::Field;
 use livae_core::quicklinks::{self, Hit};
-use livae_core::rows::{self, Extra};
+use livae_core::rows::{self, Extra, Own};
 use livae_core::search::rank_words_scored;
 use livae_core::settings::{Platform, Settings};
 use livae_core::usage::Usage;
@@ -82,7 +82,8 @@ enum Scope {
 #[derive(Clone)]
 enum Item {
     Scope(&'static str, Scope),
-    Clipboard,
+    /// One of Livae's own windows (its settings: the file).
+    Own(Own),
     App(usize),
     /// A file or folder (true for a folder).
     File(PathBuf, bool),
@@ -90,7 +91,6 @@ enum Item {
     Quicklink(Hit),
     Command(&'static commands::Def),
     Snippet(livae_core::snippets::Snippet),
-    Settings,
     /// Nothing local fits: search the web for the query.
     Web(String),
     Indexing,
@@ -515,8 +515,8 @@ impl Launcher {
                     }
                     items.push(Item::Scope("Applications", Scope::Apps));
                     items.push(Item::Scope("Files", Scope::Files));
-                    items.push(Item::Clipboard);
-                    items.push(Item::Settings);
+                    items.push(Item::Own(Own::Clipboard));
+                    items.push(Item::Own(Own::Settings));
                 }
                 Scope::Apps => {
                     let mut by_use: Vec<usize> = (0..apps.len()).collect();
@@ -540,6 +540,7 @@ impl Launcher {
                     let extras = rows::extras(&q, Platform::Windows, &s.quicklinks, &s.snippets, keyword_index, |name| usage.boost(name));
                     ranked.extend(extras.into_iter().map(|(sc, e)| {
                         (sc, match e {
+                            Extra::Own(o) => Item::Own(o),
                             Extra::Command(d) => Item::Command(d),
                             Extra::Quick(h) => Item::Quicklink(h),
                             Extra::Snippet(i) => Item::Snippet(s.snippets[i].clone()),
@@ -548,15 +549,6 @@ impl Launcher {
                 }
                 ranked.sort_by_key(|(sc, _)| std::cmp::Reverse(*sc));
                 items.extend(ranked.into_iter().map(|(_, item)| item));
-                if self.scope == Scope::All {
-                    let ql = q.to_lowercase();
-                    if "settings".starts_with(&ql) || "preferences".starts_with(&ql) {
-                        items.push(Item::Settings);
-                    }
-                    if "clipboard".starts_with(&ql) {
-                        items.push(Item::Clipboard);
-                    }
-                }
             }
             let wants_files = self.scope == Scope::Files || (self.scope == Scope::All && q.chars().count() >= 2);
             if wants_files {
@@ -635,10 +627,18 @@ impl Launcher {
         if self.selected != i { self.armed = None; self.selected = i; }
         match item {
             Item::Scope(_, scope) => self.set_scope(scope),
-            Item::Clipboard => {
+            Item::Own(Own::Clipboard) => {
                 // Open the clipboard first (it takes the focus from us), then let it close the launcher.
                 let prev = self.panel.prev.0 as isize; // a window handle is just a number across the hop
                 app::on_main(move || crate::clipboard::show_for(windows::Win32::Foundation::HWND(prev as _)));
+            }
+            Item::Own(own) => {
+                self.hide(true);
+                match own {
+                    Own::Journal => crate::journal::show(),
+                    Own::Year => crate::year::show(),
+                    _ => app::open_settings(),
+                }
             }
             Item::App(a) => {
                 let app = self.apps[a].clone();
@@ -694,10 +694,6 @@ impl Launcher {
                 shell::open(&format!("https://www.google.com/search?q={}", quicklinks::encode(&q)));
                 self.hide(false);
             }
-            Item::Settings => {
-                self.hide(true);
-                app::open_settings();
-            }
             Item::Indexing | Item::Empty => {}
         }
     }
@@ -738,7 +734,7 @@ impl Launcher {
     fn texts(&self, item: &Item) -> (String, String) {
         match item {
             Item::Scope(t, _) => (t.to_string(), String::new()),
-            Item::Clipboard => ("Clipboard".into(), String::new()),
+            Item::Own(o) => (o.name().into(), String::new()),
             Item::App(i) => (self.apps[*i].name.clone(), self.apps[*i].detail.to_string()),
             Item::File(p, _) => {
                 let name = p.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_else(|| p.to_string_lossy().to_string());
@@ -757,7 +753,6 @@ impl Launcher {
                 let short: String = line.chars().take(60).collect();
                 (if short.len() < line.len() { format!("{short}…") } else { short }, snippet.trigger.clone())
             }
-            Item::Settings => ("Livae Settings".into(), String::new()),
             Item::Web(_) => ("Search the web".into(), String::new()),
             Item::Indexing => ("Indexing files…".into(), String::new()),
             Item::Empty => {
@@ -820,7 +815,7 @@ impl Launcher {
         let item = self.items.get(self.selected)?;
         let (title, _) = self.texts(item);
         Some(match item {
-            Item::App(_) | Item::File(..) | Item::Settings | Item::Clipboard => format!("Open {title}"),
+            Item::App(_) | Item::File(..) | Item::Own(_) => format!("Open {title}"),
             Item::Answer(_) => "Copy".into(),
             Item::Quicklink(_) | Item::Command(_) | Item::Web(_) => title,
             Item::Snippet(_) => "Type it".into(),
