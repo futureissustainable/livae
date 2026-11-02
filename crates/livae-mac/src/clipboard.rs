@@ -165,7 +165,7 @@ pub fn install(mtm: MainThreadMarker) {
     let panel = Panel::new(mtm, Owner::Clipboard, &controller);
     let s = config::get();
 
-    let capsule = Glass::new(mtm, FIELD_H / 2.0, s.glass.max(0.6));
+    let capsule = Glass::tinted(mtm, FIELD_H / 2.0, s.glass.max(0.6), crate::glass::Tint::Capsule);
     let (search_icon, field, _font) = ui::search_field(mtm, &controller, "Search clipboard", WIDTH, QUERY, FIELD_H);
     if let Some(img) = ui::symbol("doc.on.clipboard") {
         search_icon.setImage(Some(&img));

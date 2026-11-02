@@ -153,7 +153,7 @@ pub fn set_glass(darkness: f64) {
     let darkness = darkness.max(0.35);
     with(|l| {
         l.capsule.set_darkness(darkness);
-        l.card.set_darkness(darkness * 0.8);
+        l.card.set_darkness(darkness);
     });
 }
 
@@ -182,7 +182,7 @@ pub fn install(mtm: MainThreadMarker) {
     let panel = Panel::new(mtm, Owner::Launcher, &controller);
     let s = config::get();
 
-    let capsule = Glass::new(mtm, FIELD_H / 2.0, s.glass.max(0.35));
+    let capsule = Glass::tinted(mtm, FIELD_H / 2.0, s.glass.max(0.35), crate::glass::Tint::Capsule);
     let (search_icon, field, field_font) = ui::search_field(mtm, &controller, "Search apps and files", WIDTH, QUERY, FIELD_H);
     capsule.content.addSubview(&search_icon);
     let hint = ui::label(mtm, QUERY, TERTIARY);
@@ -192,7 +192,7 @@ pub fn install(mtm: MainThreadMarker) {
     capsule.content.addSubview(&field);
 
     let capsule_content = capsule.content.clone();
-    let card = Glass::new(mtm, CARD_RADIUS, s.glass.max(0.35) * 0.8);
+    let card = Glass::tinted(mtm, CARD_RADIUS, s.glass.max(0.35), crate::glass::Tint::Card);
     let list = List::new(mtm, Owner::Launcher);
     // No autoresizing: layout() sets the frame; a stretchy mask on top of that shrank it twice inside the glass.
     card.content.addSubview(&list);
