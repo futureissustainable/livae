@@ -67,6 +67,7 @@ enum Fade {
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Control {
     Postpone,
+    Delay,
     Skip,
 }
 
@@ -287,10 +288,7 @@ fn notice(seconds: u32, long: bool) {
 
 /// The warning's Delay: the coming break moves `delay_min` of work later.
 pub fn delay_from_notice() {
-    act(|s, r, _, _| {
-        s.delay(r);
-        Action::None
-    });
+    act(|s, r, _, _| s.delay(r));
     glass::hide_notice();
 }
 struct Display {
@@ -398,6 +396,8 @@ impl State {
         if let Some(m) = self.postpone {
             c.push((Control::Postpone, format!("Postpone {m} min")));
         }
+        // Delay is always there, strict breaks too: the way out when a break lands at the worst moment.
+        c.push((Control::Delay, format!("Delay {} min", config::get().breaks.delay_min.max(1))));
         if self.skip {
             c.push((Control::Skip, "Skip".to_string()));
         }
@@ -417,11 +417,10 @@ impl State {
     }
 
     /// Where the time line, the time and the controls go on a screen `h` tall: (line top, time top, controls top).
-    /// With controls the stack rises so they keep a margin above the bottom edge.
+    /// There is always a control (Delay), so the stack rises to keep it a margin above the bottom edge.
     fn rows(&self, h: f32, long: bool) -> (f32, f32, f32) {
-        let has_controls = self.postpone.is_some() || self.skip;
-        let below = if long { TIME_GAP + ROW_H } else { 0.0 } + if has_controls { CONTROL_GAP + ROW_H } else { 0.0 };
-        let from_bottom = if has_controls { LINE_Y.max(below + 8.0) } else { LINE_Y };
+        let below = if long { TIME_GAP + ROW_H } else { 0.0 } + CONTROL_GAP + ROW_H;
+        let from_bottom = LINE_Y.max(below + 8.0);
         let line = h - from_bottom - LINE_H;
         let time = line + LINE_H + TIME_GAP;
         let controls = if long { time + ROW_H + CONTROL_GAP } else { line + LINE_H + CONTROL_GAP };
@@ -472,10 +471,10 @@ impl State {
         let words_h = *words_h;
         surface.draw(*scale, |c| {
             c.backdrop();
-            // Black over the blur: 0.96 at the top and bottom edges, 0.82 across the middle, so the screen shows
-            // faintly behind the quote and the edges stay OLED black.
+            // Black over the blur: 0.55 across the middle, where the quote is, deepening to 0.92 at the top and bottom
+            // edges, so the blurred desktop shows softly behind the words and the edges stay OLED black.
             let black = |a: f32| Rgba(0.0, 0.0, 0.0, a);
-            c.gradient(0.0, 0.0, c.w, c.h, &[(0.0, black(0.96)), (0.3, black(0.82)), (0.7, black(0.82)), (1.0, black(0.96))]);
+            c.gradient(0.0, 0.0, c.w, c.h, &[(0.0, black(0.92)), (0.3, black(0.55)), (0.7, black(0.55)), (1.0, black(0.92))]);
             let (x, width) = column(c.w);
             let gap = if author.is_some() { AUTHOR_GAP + AUTHOR_H } else { 0.0 };
             let top = (c.h * FROM_TOP - (words_h + gap) / 2.0).round().max(48.0);
@@ -693,6 +692,7 @@ pub fn message(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<L
             let hit = with(|st| st.control_boxes(w, h, long).into_iter().find(|(_, _, bx, by, bw)| x >= *bx && x < bx + bw && y >= *by && y < by + HIT).map(|c| c.0)).flatten();
             match hit {
                 Some(Control::Postpone) => act(|s, r, _, _| s.postpone(r)),
+                Some(Control::Delay) => act(|s, r, _, _| s.delay(r)),
                 Some(Control::Skip) => act(|s, _, _, local| s.skip(local)),
                 None => {}
             }

@@ -17,7 +17,8 @@ use objc2::{class, define_class, msg_send, sel, AnyThread, MainThreadOnly};
 use objc2_app_kit::{
     NSAppearance, NSAppearanceCustomization, NSAppearanceNameDarkAqua, NSAutoresizingMaskOptions, NSBackingStoreType, NSButton, NSColor,
     NSEvent, NSFont, NSFontAttributeName, NSFontWeightMedium, NSFontWeightRegular, NSForegroundColorAttributeName, NSLineBreakMode, NSPanel, NSParagraphStyleAttributeName, NSResponder, NSScreen, NSScreenSaverWindowLevel, NSTextAlignment,
-    NSTextField, NSView, NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask, NSWorkspace, NSWorkspaceDidWakeNotification,
+    NSTextField, NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView, NSWindow,
+    NSWindowCollectionBehavior, NSWindowStyleMask, NSWorkspace, NSWorkspaceDidWakeNotification,
     NSWorkspaceScreensDidSleepNotification, NSWorkspaceScreensDidWakeNotification, NSWorkspaceWillSleepNotification,
 };
 use objc2_core_foundation::CGPoint;
@@ -75,7 +76,7 @@ struct State {
 /// One break window, on one display.
 struct Screen {
     panel: Retained<BreakPanel>,
-    _glass: Glass,
+    _blur: Retained<NSVisualEffectView>,
     /// The part of the time line still to go.
     fill: Retained<NSView>,
     /// Minutes and seconds left, long breaks only.
@@ -147,13 +148,10 @@ define_class!(
             set_away(|a| a.displays_off = false);
         }
 
-        /// The warning's Delay: the coming break moves `delay_min` of work later.
+        /// Delay, in the warning or during a break: the next break comes `delay_min` of work later (a running one ends).
         #[unsafe(method(delay:))]
         fn delay(&self, _s: Option<&AnyObject>) {
-            act(|s, r, _, _| {
-                s.delay(r);
-                Action::None
-            });
+            act(|s, r, _, _| s.delay(r));
             hide_notice();
         }
 
@@ -545,21 +543,22 @@ fn quiet_button(mtm: MainThreadMarker, title: &str, action: Sel, target: &Target
     b
 }
 
-/// Black over the glass: 0.96 at the top and bottom edges, 0.82 across the middle, so the blurred desktop
-/// shows faintly behind the quote and the edges stay OLED black.
+/// A vignette over the blurred desktop: black at 0.40 in the middle, where the quote is, deepening to 0.92 at the
+/// corners, so the desktop shows softly behind the words and the edges stay OLED black (the approved preview).
 fn shade(mtm: MainThreadMarker, size: NSSize) -> Retained<NSView> {
     let view = NSView::initWithFrame(NSView::alloc(mtm), NSRect::new(NSPoint::new(0.0, 0.0), size));
     view.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable);
     view.setWantsLayer(true);
     let layer = CAGradientLayer::new();
-    layer.setStartPoint(CGPoint::new(0.5, 1.0));
-    layer.setEndPoint(CGPoint::new(0.5, 0.0));
-    let stops = [0.96, 0.82, 0.82, 0.96].map(|a| NSColor::colorWithWhite_alpha(0.0, a).CGColor());
+    layer.setType(unsafe { objc2_quartz_core::kCAGradientLayerRadial });
+    layer.setStartPoint(CGPoint::new(0.5, 0.5));
+    layer.setEndPoint(CGPoint::new(1.0, 1.0));
+    let stops = [0.40, 0.55, 0.80, 0.92].map(|a| NSColor::colorWithWhite_alpha(0.0, a).CGColor());
     // CGColor is toll-free bridged to an object, which is what the layer's colour array holds.
     let as_object = |c: &CGColor| -> &AnyObject { unsafe { &*(c as *const CGColor as *const AnyObject) } };
     let colors: Vec<&AnyObject> = stops.iter().map(|c| as_object(c)).collect();
     unsafe { layer.setColors(Some(&NSArray::from_slice(&colors))) };
-    layer.setLocations(Some(&NSArray::from_retained_slice(&[0.0, 0.3, 0.7, 1.0].map(NSNumber::numberWithDouble))));
+    layer.setLocations(Some(&NSArray::from_retained_slice(&[0.0, 0.45, 0.8, 1.0].map(NSNumber::numberWithDouble))));
     view.setLayer(Some(&layer));
     view
 }
@@ -578,11 +577,13 @@ fn bar(mtm: MainThreadMarker, frame: NSRect, color: &NSColor) -> Retained<NSView
 fn build(mtm: MainThreadMarker, frame: NSRect, b: &Break, quote: &Quote, skip: bool, postpone: Option<u32>, target: &Target) -> Screen {
     let (w, h) = (frame.size.width, frame.size.height);
     let panel = BreakPanel::new(mtm, frame);
-    // Apple's glass edge to edge, its own gradient off; the break's shade does the darkening.
-    let glass = Glass::new(mtm, 0.0, 0.0);
-    panel.setContentView(Some(&glass.root));
-    glass.root.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), frame.size));
-    let v = &glass.content;
+    // The desktop, strongly blurred (the system's dark HUD blur, as Stretchly's break had); the shade dims it.
+    let blur = NSVisualEffectView::initWithFrame(NSVisualEffectView::alloc(mtm), NSRect::new(NSPoint::new(0.0, 0.0), frame.size));
+    blur.setMaterial(NSVisualEffectMaterial::HUDWindow);
+    blur.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
+    blur.setState(NSVisualEffectState::Active);
+    panel.setContentView(Some(&blur));
+    let v: &NSView = &blur;
     v.addSubview(&shade(mtm, frame.size));
 
     // The quote with the owner's line breaks, and its author.
@@ -610,9 +611,12 @@ fn build(mtm: MainThreadMarker, frame: NSRect, b: &Break, quote: &Quote, skip: b
 
     // The time line; long breaks add minutes and seconds under it, then the controls. When controls show,
     // the stack rises so they keep a margin above the bottom edge.
+    // Delay is always there, strict breaks too: the way out when a break lands at the worst moment.
+    let delay = quiet_button(mtm, &format!("Delay {} min", config::get().breaks.delay_min.max(1)), sel!(delay:), target);
     let buttons: Vec<Retained<NSButton>> = postpone
         .map(|m| quiet_button(mtm, &format!("Postpone {m} min"), sel!(postpone:), target))
         .into_iter()
+        .chain([delay])
         .chain(skip.then(|| quiet_button(mtm, "Skip", sel!(skip:), target)))
         .collect();
     let row_h = text::LABEL.leading;
@@ -646,7 +650,7 @@ fn build(mtm: MainThreadMarker, frame: NSRect, b: &Break, quote: &Quote, skip: b
         bx += bw + spacing;
     }
 
-    Screen { panel, _glass: glass, fill, time }
+    Screen { panel, _blur: blur, fill, time }
 }
 
 /// Draws the time line at 30 fps while a break is on screen.

@@ -319,11 +319,12 @@ impl Scheduler {
         Action::End
     }
 
-    /// Move the coming break `delay` of work from now (the warning's Delay). Nothing once a break has begun.
-    pub fn delay(&mut self, r: &Rules) {
-        if self.running.is_none() {
-            self.worked = self.target(r) - r.delay;
-        }
+    /// Delay: the next break comes `delay` of work from now. From the warning it moves the coming break; during a
+    /// break (strict ones too, for when it lands at the worst moment) it ends that break without counting it.
+    pub fn delay(&mut self, r: &Rules) -> Action {
+        self.postponed = false;
+        self.worked = self.target(r) - r.delay;
+        self.close()
     }
 
     /// Skip the coming break: a running break ends if it may be skipped; otherwise the timer starts over.
@@ -606,9 +607,13 @@ mod tests {
         let mut sim = Sim::new(Rules { delay: 120.0, ..short() });
         sim.step(0.0);
         assert_eq!(sim.run(57).last(), Some(&(57, Action::Notice { seconds: 3, long: false })));
-        sim.s.delay(&sim.r);
+        assert_eq!(sim.s.delay(&sim.r), Action::None);
         assert_eq!(sim.status(), Status::Next { seconds: 120.0, long: false });
-        assert_eq!(sim.starts(125), vec![(120, false)]);
+        assert_eq!(sim.starts(121), vec![(120, false)]);
+        // During a strict break: it ends now, uncounted, and the next one is a full delay away.
+        assert!(sim.s.running().is_some_and(|b| b.strict));
+        assert_eq!(sim.s.delay(&sim.r), Action::End);
+        assert_eq!(sim.status(), Status::Next { seconds: 120.0, long: false });
     }
 
     #[test]
