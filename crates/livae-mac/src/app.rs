@@ -481,6 +481,19 @@ fn start(mtm: MainThreadMarker, delegate: &AppDelegate) {
         let after = dispatch2::DispatchTime::NOW.time((secs * 1e9) as i64);
         let _ = dispatch2::DispatchQueue::main().after(after, || crate::launcher::with(|l| l.hide()));
     }
+    // `--post-scroll dy`: a test copy scrolls its clipboard list 6 times by dy points, as a trackpad would.
+    if let Some(dy) = args.iter().position(|a| a == "--post-scroll").and_then(|i| args.get(i + 1)).and_then(|d| d.parse::<i32>().ok()).filter(|_| test_mode()) {
+        let after = dispatch2::DispatchTime::NOW.time(2_500_000_000);
+        let _ = dispatch2::DispatchQueue::main().after(after, move || {
+            for _ in 0..6 {
+                let mut hit = None;
+                crate::clipboard::with(|c| hit = c.test_scroll(dy));
+                if let Some((view, event)) = hit {
+                    view.scrollWheel(&event);
+                }
+            }
+        });
+    }
     // `--type-keys text`: a test copy types it after 2.5 s into the app in front (a check's own throwaway window).
     if let Some(text) = args.iter().position(|a| a == "--type-keys").and_then(|i| args.get(i + 1)).filter(|_| test_mode()).cloned() {
         let after = dispatch2::DispatchTime::NOW.time(2_500_000_000);

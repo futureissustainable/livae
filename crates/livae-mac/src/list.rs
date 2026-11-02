@@ -18,7 +18,12 @@ pub enum Owner {
 
 pub struct Ivars {
     owner: Cell<Owner>,
+    /// Scrolled points not yet a whole row (trackpads send small, smooth steps).
+    scrolled: Cell<f64>,
 }
+
+/// A row's height for scrolling: one row per this many points of scroll.
+const ROW: f64 = 44.0;
 
 define_class!(
     #[unsafe(super(NSView, NSResponder, NSObject))]
@@ -65,6 +70,23 @@ define_class!(
                 menu.addItem(&item);
             }
             NSMenu::popUpContextMenu_withEvent_forView(&menu, event, self);
+        }
+
+        /// The mouse wheel or a trackpad moves the list by whole rows.
+        #[unsafe(method(scrollWheel:))]
+        fn scroll_wheel(&self, event: &NSEvent) {
+            // A wheel sends lines, a trackpad points; either way, one row per ROW points. Up shows earlier rows.
+            let dy = if event.hasPreciseScrollingDeltas() { event.scrollingDeltaY() } else { event.scrollingDeltaY() * ROW };
+            let total = self.ivars().scrolled.get() + dy;
+            let rows = (total / ROW).trunc();
+            self.ivars().scrolled.set(total - rows * ROW);
+            if rows != 0.0 {
+                let by = -rows as isize;
+                match self.ivars().owner.get() {
+                    Owner::Launcher => crate::launcher::with(|l| l.scroll(by)),
+                    Owner::Clipboard => crate::clipboard::with(|c| c.scroll(by)),
+                }
+            }
         }
 
         #[unsafe(method(mouseMoved:))]
@@ -123,7 +145,7 @@ thread_local! {
 
 impl List {
     pub fn new(mtm: MainThreadMarker, owner: Owner) -> Retained<Self> {
-        let this = Self::alloc(mtm).set_ivars(Ivars { owner: Cell::new(owner) });
+        let this = Self::alloc(mtm).set_ivars(Ivars { owner: Cell::new(owner), scrolled: Cell::new(0.0) });
         unsafe { msg_send![super(this), init] }
     }
 

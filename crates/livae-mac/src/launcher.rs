@@ -738,6 +738,19 @@ impl Launcher {
         self.rebuild(&q);
     }
 
+    /// Scroll the list by `by` rows (the wheel or a trackpad); the selection stays among the rows on screen.
+    pub fn scroll(&mut self, by: isize) {
+        let shown = config::get().rows();
+        let Some(last) = self.items.len().checked_sub(1) else { return };
+        let first = (self.first as isize + by).clamp(0, self.items.len().saturating_sub(shown) as isize) as usize;
+        if first == self.first {
+            return;
+        }
+        self.first = first;
+        self.selected = self.selected.clamp(first, (first + shown - 1).min(last));
+        self.layout();
+    }
+
     fn move_selection(&mut self, by: isize) {
         if self.items.is_empty() {
             return;

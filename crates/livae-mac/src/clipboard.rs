@@ -555,6 +555,35 @@ impl Clipboard {
         first
     }
 
+    /// `--post-scroll dy`: a test copy scrolls its own list the way a trackpad does, through the window's event path
+    /// (hit testing included), `dy` points at a time.
+    pub fn test_scroll(&self, dy: i32) -> Option<(Retained<NSView>, Retained<NSEvent>)> {
+        use objc2_core_graphics::{CGEvent, CGEventField, CGScrollEventUnit};
+        let f = self.panel.frame();
+        let at = objc2_core_foundation::CGPoint::new(f.origin.x + f.size.width / 2.0, ui::primary_height(self.mtm) - (f.origin.y + f.size.height * 0.4));
+        let cg = CGEvent::new_scroll_wheel_event2(None, CGScrollEventUnit::Pixel, 1, dy, 0, 0)?;
+        CGEvent::set_location(Some(&cg), at);
+        CGEvent::set_integer_value_field(Some(&cg), CGEventField::ScrollWheelEventIsContinuous, 1);
+        CGEvent::set_integer_value_field(Some(&cg), CGEventField::MouseEventWindowUnderMousePointer, self.panel.windowNumber() as i64);
+        // Such an event has no window, so the caller hands it to the view under the point, as AppKit does with a real
+        // one (after this borrow of the clipboard ends, as with a real scroll).
+        let point = self.panel.convertPointFromScreen(NSPoint::new(f.origin.x + f.size.width / 2.0, f.origin.y + f.size.height * 0.4));
+        Some((self.panel.contentView()?.hitTest(point)?, NSEvent::eventWithCGEvent(&cg)?))
+    }
+
+    /// Scroll the list by `by` items (the wheel or a trackpad); the selection stays among the items on screen.
+    pub fn scroll(&mut self, by: isize) {
+        let Some(last) = self.shown.len().checked_sub(1) else { return };
+        let first = (self.first as isize + by).clamp(0, self.first_ending_at(last) as isize) as usize;
+        if first == self.first {
+            return;
+        }
+        self.first = first;
+        let fit = self.fit_from(first);
+        self.selected = self.selected.clamp(first, (first + fit - 1).min(last));
+        self.layout();
+    }
+
     fn move_selection(&mut self, by: isize) {
         if self.shown.is_empty() {
             return;
