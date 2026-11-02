@@ -28,6 +28,8 @@ mod motion;
 #[cfg(windows)]
 mod shell;
 #[cfg(windows)]
+mod sound;
+#[cfg(windows)]
 mod system;
 #[cfg(windows)]
 mod tray;

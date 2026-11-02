@@ -27,7 +27,7 @@ use windows::Win32::System::Threading::{CreateMutexW, GetCurrentProcessId};
 use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-use crate::{breaks, clipboard, config, expand, gate, glass, hotkeys, journal, launcher, shell, tray, year};
+use crate::{breaks, clipboard, config, expand, gate, glass, hotkeys, journal, launcher, shell, sound, tray, year};
 
 const WM_RUN: u32 = WM_APP + 2;
 const WM_HOTKEY_PRESSED: u32 = WM_APP + 3;
@@ -226,6 +226,10 @@ pub fn run() {
         let _ = SetTimer(Some(hwnd), T_JOURNAL, 30_000, None);
     }
     journal::install();
+    // A test copy leaves the real devices and Equalizer APO alone unless a check asks for them.
+    if !config::test_mode() || std::env::var_os("LIVAE_TEST_SOUND").is_some() {
+        sound::install();
+    }
 
     if config::flag("--clipboard") {
         clipboard::show();
@@ -305,6 +309,7 @@ fn tick() {
         }
         launcher::settings_changed(&before, &after);
         clipboard::settings_changed(&before, &after);
+        sound::settings_changed(&before, &after);
     }
     if !config::test_mode() {
         hotkeys::retry();
@@ -328,6 +333,12 @@ fn command(cmd: u32) {
         tray::BREAK_PAUSE_HOUR => breaks::pause_for(60),
         tray::BREAK_PAUSE_MORNING => breaks::pause_until_morning(),
         tray::BREAK_RESUME => breaks::resume(),
+        tray::EQ_TOGGLE => {
+            let before = config::get();
+            config::update(|s| s.sound.eq = !s.sound.eq);
+            sound::settings_changed(&before, &config::get());
+        }
+        tray::EQ_EDIT => open_settings(),
         tray::QUIT => unsafe {
             let _ = DestroyWindow(main_hwnd());
         },

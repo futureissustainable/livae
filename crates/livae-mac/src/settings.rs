@@ -59,6 +59,11 @@ struct Ui {
     login: Retained<NSSwitch>,
     expansion: Retained<NSSwitch>,
     expansion_status: Retained<NSTextField>,
+    outputs: Retained<NSPopUpButton>,
+    inputs: Retained<NSPopUpButton>,
+    eq: Retained<NSSwitch>,
+    eq_status: Retained<NSTextField>,
+    eq_allow: Retained<NSButton>,
     /// The scroll view when the content is taller than the screen; every open starts at the top.
     scroll: Option<Retained<NSScrollView>>,
     _target: Retained<Target>,
@@ -68,6 +73,8 @@ struct Ui {
 thread_local! {
     static UI: RefCell<Option<Ui>> = const { RefCell::new(None) };
     static RECORDING: Cell<Option<Recording>> = const { Cell::new(None) };
+    /// The device names behind the Output and Microphone menus' items, by tag.
+    static CHOICES: RefCell<(Vec<String>, Vec<String>)> = const { RefCell::new((Vec::new(), Vec::new())) };
 }
 
 define_class!(
@@ -314,6 +321,37 @@ define_class!(
             }
         }
 
+        #[unsafe(method(outputPicked:))]
+        fn output_picked(&self, sender: Option<&AnyObject>) {
+            pick_device(sender, true);
+        }
+
+        #[unsafe(method(inputPicked:))]
+        fn input_picked(&self, sender: Option<&AnyObject>) {
+            pick_device(sender, false);
+        }
+
+        #[unsafe(method(eqToggled:))]
+        fn eq_toggled(&self, sender: Option<&AnyObject>) {
+            if let Some(sw) = sender.and_then(|s| s.downcast_ref::<NSSwitch>()) {
+                let on = sw.state() == NSControlStateValueOn;
+                config::update(|s| s.sound.eq = on);
+            }
+        }
+
+        #[unsafe(method(editEq:))]
+        fn edit_eq(&self, _s: Option<&AnyObject>) {
+            crate::equalizer::show();
+        }
+
+        /// Screen & System Audio Recording, where macOS lets Livae hear what apps play.
+        #[unsafe(method(allowAudio:))]
+        fn allow_audio(&self, _s: Option<&AnyObject>) {
+            if let Some(url) = objc2_foundation::NSURL::URLWithString(ns_string!("x-apple.systempreferences:com.apple.preference.security?Privacy_AudioCapture")) {
+                objc2_app_kit::NSWorkspace::sharedWorkspace().openURL(&url);
+            }
+        }
+
         #[unsafe(method(loginToggled:))]
         fn login_toggled(&self, sender: Option<&AnyObject>) {
             if let Some(sw) = sender.and_then(|s| s.downcast_ref::<NSSwitch>()) {
@@ -391,6 +429,71 @@ fn finish_recording(shortcut: Option<String>) {
 }
 
 /// Bring every control in line with the saved settings and the system state.
+/// The equaliser's state or the devices changed: show it.
+pub fn sound_changed() {
+    refresh();
+    crate::equalizer::reload();
+}
+
+/// An Output or Microphone menu item: add the device to the end of the order, or take it out; the last item
+/// clears the order (macOS chooses again).
+fn pick_device(sender: Option<&AnyObject>, output: bool) {
+    let Some(item) = sender.and_then(|s| s.downcast_ref::<NSPopUpButton>()).and_then(|p| p.selectedItem()) else { return };
+    let tag = item.tag();
+    let name = CHOICES.with(|c| {
+        let c = c.borrow();
+        let list = if output { &c.0 } else { &c.1 };
+        usize::try_from(tag).ok().and_then(|i| list.get(i).cloned())
+    });
+    config::update(|s| {
+        let order = if output { &mut s.sound.outputs } else { &mut s.sound.inputs };
+        match name {
+            None => order.clear(),
+            Some(n) => match order.iter().position(|o| *o == n) {
+                Some(i) => {
+                    order.remove(i);
+                }
+                None => order.push(n),
+            },
+        }
+    });
+}
+
+/// Fill a pull-down with the devices: chosen ones first in their order (numbered), then the rest connected.
+fn fill_choices(menu: &NSPopUpButton, order: &[String], connected: &[String]) -> Vec<String> {
+    let mut names: Vec<String> = order.to_vec();
+    names.extend(connected.iter().filter(|c| !order.contains(c)).cloned());
+    menu.removeAllItems();
+    let title = match order {
+        [] => "macOS chooses".to_string(),
+        [one] => one.clone(),
+        [first, rest @ ..] => format!("{first}, then {}", rest.join(", then ")),
+    };
+    menu.addItemWithTitle(&NSString::from_str(&title));
+    for (i, n) in names.iter().enumerate() {
+        let shown = match (order.iter().position(|o| o == n), connected.contains(n)) {
+            (Some(at), true) => format!("{}. {n}", at + 1),
+            (Some(at), false) => format!("{}. {n} (not connected)", at + 1),
+            (None, _) => n.clone(),
+        };
+        menu.addItemWithTitle(&NSString::from_str(&shown));
+        if let Some(item) = menu.lastItem() {
+            item.setTag(i as isize);
+            item.setState(if order.contains(n) { NSControlStateValueOn } else { NSControlStateValueOff });
+        }
+    }
+    if !order.is_empty() {
+        if let Some(m) = menu.menu() {
+            m.addItem(&objc2_app_kit::NSMenuItem::separatorItem(MainThreadMarker::new().unwrap()));
+        }
+        menu.addItemWithTitle(ns_string!("Let macOS Choose"));
+        if let Some(item) = menu.lastItem() {
+            item.setTag(-1);
+        }
+    }
+    names
+}
+
 pub fn refresh() {
     let s = config::get();
     UI.with(|u| {
@@ -454,6 +557,17 @@ pub fn refresh() {
             };
             status.setStringValue(&NSString::from_str(&line));
         }
+        if let Some((outputs, inputs, eq, eq_status, eq_allow)) = u.borrow().as_ref().map(|ui| (ui.outputs.clone(), ui.inputs.clone(), ui.eq.clone(), ui.eq_status.clone(), ui.eq_allow.clone())) {
+            let devices = crate::sound::devices();
+            let names = |out: bool| devices.iter().filter(|d| if out { d.output } else { d.input }).map(|d| d.name.clone()).collect::<Vec<_>>();
+            let o = fill_choices(&outputs, &s.sound.outputs, &names(true));
+            let i = fill_choices(&inputs, &s.sound.inputs, &names(false));
+            CHOICES.with(|c| *c.borrow_mut() = (o, i));
+            eq.setState(if s.sound.eq { NSControlStateValueOn } else { NSControlStateValueOff });
+            let status = crate::sound::status();
+            eq_status.setStringValue(&NSString::from_str(&status.text()));
+            eq_allow.setHidden(status != crate::sound::Status::NeedsPermission);
+        }
     });
 }
 
@@ -477,7 +591,9 @@ pub fn show() {
             ui.window.center();
             if let Some(scroll) = &ui.scroll
                 && let Some(doc) = scroll.documentView() {
-                    let top = doc.frame().size.height - scroll.contentSize().height;
+                    // A test copy can open it at the end, to check the last sections.
+                    let end = crate::app::test_mode() && std::env::var_os("LIVAE_TEST_SETTINGS_END").is_some();
+                    let top = if end { 0.0 } else { doc.frame().size.height - scroll.contentSize().height };
                     scroll.contentView().scrollToPoint(NSPoint::new(0.0, top.max(0.0)));
                     scroll.reflectScrolledClipView(&scroll.contentView());
                 }
@@ -496,13 +612,14 @@ fn build(mtm: MainThreadMarker) {
     let this = Target::alloc(mtm).set_ivars(());
     let target: Retained<Target> = unsafe { msg_send![super(this), init] };
     let tgt = Some(&*target as &AnyObject);
-    // Title, seven sections, the rows below them, the version line.
+    // Title, eight sections, the rows below them, the version line.
     let breaks_rows = 4.0 * ROW + (ROW - 16.0);
     let journal_rows = 2.0 * ROW + (ROW - 16.0);
     let general_rows = ROW + ROW + (ROW - 12.0);
-    let rows = 2.0 * ROW + 2.0 * ROW + (ROW + (ROW - 12.0) + ROW + ROW + ROW + (ROW - 16.0)) + (ROW + (ROW - 16.0) + (ROW - 12.0) + ROW) + breaks_rows + journal_rows + general_rows;
+    let sound_rows = 3.0 * ROW + (ROW - 12.0);
+    let rows = 2.0 * ROW + 2.0 * ROW + (ROW + (ROW - 12.0) + ROW + ROW + ROW + (ROW - 16.0)) + (ROW + (ROW - 16.0) + (ROW - 12.0) + ROW) + breaks_rows + journal_rows + sound_rows + general_rows;
     // The title starts below the traffic lights (TITLEBAR).
-    let h = TITLEBAR + 28.0 + 7.0 * SECTION + rows + 16.0 + 18.0 + PAD;
+    let h = TITLEBAR + 28.0 + 8.0 * SECTION + rows + 16.0 + 18.0 + PAD;
     // Taller than the screen: the same content in a scroll view, the window as tall as fits.
     let fits = NSScreen::mainScreen(mtm).map(|m| m.visibleFrame().size.height - 60.0).unwrap_or(h).min(h);
     let window = crate::ui::titled_window(mtm, NSSize::new(W, fits));
@@ -741,6 +858,42 @@ fn build(mtm: MainThreadMarker) {
     let at = popup(JOURNAL_AT.iter().map(|t| t.to_string()).collect(), JOURNAL_AT.iter().position(|&t| t == s.journal.at).unwrap_or(2), sel!(journalAtChanged:));
     right(&at, 130.0, y, 28.0);
 
+    // The output and microphone kept in use, and the equaliser on the output.
+    section("Sound", &mut y);
+    let pulldown = |action: objc2::runtime::Sel| {
+        let p = NSPopUpButton::initWithFrame_pullsDown(NSPopUpButton::alloc(mtm), NSRect::ZERO, true);
+        unsafe {
+            p.setTarget(tgt);
+            p.setAction(Some(action));
+        }
+        p
+    };
+    y -= ROW;
+    label_at("Output", y);
+    let outputs = pulldown(sel!(outputPicked:));
+    right(&outputs, 260.0, y, 28.0);
+    y -= ROW;
+    label_at("Microphone", y);
+    let inputs = pulldown(sel!(inputPicked:));
+    right(&inputs, 260.0, y, 28.0);
+    y -= ROW;
+    label_at("Equaliser", y);
+    let eq = NSSwitch::new(mtm);
+    unsafe {
+        eq.setTarget(tgt);
+        eq.setAction(Some(sel!(eqToggled:)));
+    }
+    right(&eq, 40.0, y, 22.0);
+    y -= ROW - 12.0;
+    let eq_status = text(mtm, "", 14.0, tokens::color::dark::TEXT_SECONDARY);
+    eq_status.setFrame(NSRect::new(NSPoint::new(PAD, y + 14.0), NSSize::new(W - 2.0 * PAD - 220.0, 18.0)));
+    v.addSubview(&eq_status);
+    let eq_allow = unsafe { NSButton::buttonWithTitle_target_action(ns_string!("Allow…"), tgt, Some(sel!(allowAudio:)), mtm) };
+    eq_allow.setFrame(NSRect::new(NSPoint::new(W - PAD - 210.0, y + (ROW - 28.0) / 2.0), NSSize::new(100.0, 28.0)));
+    v.addSubview(&eq_allow);
+    let eq_edit = unsafe { NSButton::buttonWithTitle_target_action(ns_string!("Edit…"), tgt, Some(sel!(editEq:)), mtm) };
+    right(&eq_edit, 100.0, y, 28.0);
+
     section("General", &mut y);
     y -= ROW;
     label_at("Open at login", y);
@@ -789,6 +942,6 @@ fn build(mtm: MainThreadMarker) {
 
     window.setDelegate(Some(ProtocolObject::from_ref(&*target)));
     UI.with(|u| {
-        *u.borrow_mut() = Some(Ui { window, glass, launcher, clipboard, paste_status, allow, folders, home_only: reset, ignored, ignore_reset, history_count, breaks_status, journal_status, private_status, private_allow, login, expansion, expansion_status, scroll: scroll_view, _target: target, _monitor: monitor })
+        *u.borrow_mut() = Some(Ui { window, glass, launcher, clipboard, paste_status, allow, folders, home_only: reset, ignored, ignore_reset, history_count, breaks_status, journal_status, private_status, private_allow, login, expansion, expansion_status, outputs, inputs, eq, eq_status, eq_allow, scroll: scroll_view, _target: target, _monitor: monitor })
     });
 }

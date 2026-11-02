@@ -15,6 +15,8 @@ mod clipboard;
 #[cfg(target_os = "macos")]
 mod config;
 #[cfg(target_os = "macos")]
+mod equalizer;
+#[cfg(target_os = "macos")]
 mod expand;
 #[cfg(target_os = "macos")]
 mod gate;
@@ -34,6 +36,8 @@ mod motion;
 mod panel;
 #[cfg(target_os = "macos")]
 mod settings;
+#[cfg(target_os = "macos")]
+mod sound;
 #[cfg(target_os = "macos")]
 mod system;
 #[cfg(target_os = "macos")]

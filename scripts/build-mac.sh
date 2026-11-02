@@ -32,6 +32,7 @@ cat > "$APP.new/Contents/Info.plist" <<PLIST
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
   <key>ATSApplicationFontsPath</key><string>Fonts</string>
+  <key>NSAudioCaptureUsageDescription</key><string>Livae plays what apps send to your output through your equaliser.</string>
 </dict></plist>
 PLIST
 if [ $PACKAGE = 1 ]; then

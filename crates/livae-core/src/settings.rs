@@ -52,6 +52,8 @@ pub struct Settings {
     pub quicklinks: Vec<crate::quicklinks::Quicklink>,
     /// Shortcuts for launcher commands by id: "left-half" = "Hyper+Left", "lock-screen" = "Ctrl+Opt+L".
     pub hotkeys: BTreeMap<String, String>,
+    /// The output and microphone kept in use, and the equaliser.
+    pub sound: crate::sound::Sound,
 }
 
 impl Settings {
@@ -81,6 +83,7 @@ impl Settings {
             snippets: crate::snippets::defaults(),
             quicklinks: crate::quicklinks::defaults(),
             hotkeys: BTreeMap::new(),
+            sound: crate::sound::Sound::default(),
         }
     }
 }

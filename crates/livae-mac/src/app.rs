@@ -93,6 +93,8 @@ thread_local! {
     /// The disabled first line of the Breaks submenu ("Next break in 12 min"), refreshed when the menu opens.
     static BREAKS_STATUS: RefCell<Option<Retained<NSMenuItem>>> = const { RefCell::new(None) };
     static JOURNAL_STATUS: RefCell<Option<Retained<NSMenuItem>>> = const { RefCell::new(None) };
+    /// The Equaliser submenu's status line and its on/off item.
+    static EQ_ITEMS: RefCell<Option<(Retained<NSMenuItem>, Retained<NSMenuItem>)>> = const { RefCell::new(None) };
     static SHORTCUTS: RefCell<Option<Shortcuts>> = const { RefCell::new(None) };
     static KEEP: RefCell<Vec<Retained<AnyObject>>> = const { RefCell::new(Vec::new()) };
     /// Hotkey id to the launcher command it runs (`[hotkeys]` in the settings).
@@ -182,12 +184,17 @@ pub fn settings_changed(before: &Settings, after: &Settings) {
     if before.expansion != after.expansion || before.snippets != after.snippets {
         crate::expand::apply();
     }
+    if before.sound != after.sound {
+        let pin = before.sound.outputs != after.sound.outputs || before.sound.inputs != after.sound.inputs;
+        crate::sound::schedule(pin);
+    }
     if before.glass != after.glass {
         crate::launcher::set_glass(after.glass);
         crate::clipboard::set_glass(after.glass);
         crate::settings::set_glass(after.glass);
         crate::journal::set_glass(after.glass);
         crate::year::set_glass(after.glass);
+        crate::equalizer::set_glass(after.glass);
     }
 }
 
@@ -210,6 +217,12 @@ define_class!(
             JOURNAL_STATUS.with(|j| {
                 if let Some(item) = j.borrow().as_ref() {
                     item.setTitle(&NSString::from_str(&crate::journal::status_line()));
+                }
+            });
+            EQ_ITEMS.with(|e| {
+                if let Some((status, toggle)) = e.borrow().as_ref() {
+                    status.setTitle(&NSString::from_str(&crate::sound::status().text()));
+                    toggle.setTitle(if config::get().sound.eq { ns_string!("Turn Off") } else { ns_string!("Turn On") });
                 }
             });
         }
@@ -246,6 +259,17 @@ define_class!(
         #[unsafe(method(openJournal:))]
         fn open_journal(&self, _s: Option<&AnyObject>) {
             crate::journal::show();
+        }
+
+        #[unsafe(method(eqToggle:))]
+        fn eq_toggle(&self, _s: Option<&AnyObject>) {
+            config::update(|s| s.sound.eq = !s.sound.eq);
+            crate::settings::refresh();
+        }
+
+        #[unsafe(method(eqEdit:))]
+        fn eq_edit(&self, _s: Option<&AnyObject>) {
+            crate::equalizer::show();
         }
 
         #[unsafe(method(breakNow:))]
@@ -358,6 +382,20 @@ fn start(mtm: MainThreadMarker, delegate: &AppDelegate) {
     breaks_item.setSubmenu(Some(&breaks_menu));
     menu.addItem(&breaks_item);
     BREAKS_STATUS.with(|b| *b.borrow_mut() = Some(breaks_status));
+    // The equaliser: what it is doing, on or off, and its window.
+    let eq_item = NSMenuItem::new(mtm);
+    eq_item.setTitle(ns_string!("Equaliser"));
+    let eq_menu = NSMenu::new(mtm);
+    let eq_status = NSMenuItem::new(mtm);
+    eq_status.setEnabled(false);
+    eq_menu.addItem(&eq_status);
+    eq_menu.addItem(&NSMenuItem::separatorItem(mtm));
+    let eq_toggle = menu_item(mtm, "Turn On", sel!(eqToggle:), "", delegate);
+    eq_menu.addItem(&eq_toggle);
+    eq_menu.addItem(&menu_item(mtm, "Edit Equaliser…", sel!(eqEdit:), "", delegate));
+    eq_item.setSubmenu(Some(&eq_menu));
+    menu.addItem(&eq_item);
+    EQ_ITEMS.with(|e| *e.borrow_mut() = Some((eq_status, eq_toggle)));
     menu.setDelegate(Some(ProtocolObject::from_ref(delegate)));
     menu.addItem(&NSMenuItem::separatorItem(mtm));
     menu.addItem(&menu_item(mtm, "Settings…", sel!(openSettings:), ",", delegate));
@@ -371,6 +409,10 @@ fn start(mtm: MainThreadMarker, delegate: &AppDelegate) {
     crate::clipboard::install(mtm);
     crate::breaks::install(mtm);
     crate::journal::install(mtm);
+    // A test copy leaves the real devices alone unless a check asks for them.
+    if !test_mode() || std::env::var_os("LIVAE_TEST_SOUND").is_some() {
+        crate::sound::install();
+    }
     crate::journal::on_change(claim_pending);
     if !test_mode() {
         crate::gate::install_manifest();
@@ -455,6 +497,16 @@ fn start(mtm: MainThreadMarker, delegate: &AppDelegate) {
     }
     if args.iter().any(|a| a == "--settings") {
         crate::settings::show();
+    }
+    if args.iter().any(|a| a == "--equalizer") {
+        crate::equalizer::show();
+    }
+    // `--sound-dump file`: the devices, the ones in use and the equaliser's state, once it has settled.
+    if let Some(path) = args.iter().position(|a| a == "--sound-dump").and_then(|i| args.get(i + 1)).cloned() {
+        let after = dispatch2::DispatchTime::NOW.time(4_000_000_000);
+        let _ = dispatch2::DispatchQueue::main().after(after, move || {
+            let _ = std::fs::write(&path, crate::sound::dump());
+        });
     }
     if args.iter().any(|a| a == "--year") {
         crate::year::show_test(&args);

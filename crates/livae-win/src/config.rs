@@ -79,6 +79,9 @@ pub const HEADER: &str = "# Livae settings. Save the file and Livae applies it w
 # Window ids: left-half, right-half, top-half, bottom-half, maximize, almost-maximize.\n\
 # More window ids: center, restore, next-display, left-third, center-third, right-third.\n\
 # More window ids: left-two-thirds, right-two-thirds, top-left, top-right, bottom-left, bottom-right.\n\
+# [sound]: outputs and inputs = device names, first choice first; whenever a device comes or goes, the first one\n\
+#   connected is put in use. eq = true runs [[sound.profiles]] through Equalizer APO (free, install it first):\n\
+#   device = the output's name (empty: every output), bands = 10 dB values 32 Hz to 16 kHz, boost = dB, filters = AutoEq text.\n\
 # [breaks]: break reminders, off until enabled (minutes, seconds; strict breaks cannot be skipped).\n\
 # [journal]: the evening note; at = \"HH:MM\", file = the Markdown file it is written to (\"~\" is your user folder).\n\n";
 

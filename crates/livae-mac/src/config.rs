@@ -46,6 +46,7 @@ pub struct Settings {
     pub quicklinks: Vec<Quicklink>,
     /// Shortcuts for launcher commands by id ("left-half" = "Hyper+Left").
     pub hotkeys: BTreeMap<String, String>,
+    pub sound: livae_core::sound::Sound,
 }
 
 /// A pause before a site: `seconds` the first time each day, `step` more for every pass that day.
@@ -107,6 +108,7 @@ impl Default for Settings {
             currency: c.currency,
             expansion: c.expansion,
             snippets: c.snippets,
+            sound: c.sound,
             quicklinks: c.quicklinks,
             hotkeys: c.hotkeys,
         }
@@ -221,6 +223,7 @@ const HEADER: &str = "# Livae settings. Change them in Livae → Settings, or he
 # currency: what money answers convert to when none is named (\"RON\", \"USD\"); empty: your region's.\n\
 # expansion + [[snippets]]: type a trigger in any app and it becomes the text; {date} {time} {clipboard} {cursor} fill in.\n\
 # [[quicklinks]]: the keyword, a space and words open the url with {query} replaced (\"gh livae\").\n\
+# [sound]: outputs and inputs = device names, first choice first (Settings, Sound); [[sound.profiles]] = the Equaliser.\n\
 # [hotkeys]: a shortcut for any launcher command, by id: left-half = \"Ctrl+Opt+Left\", lock-screen = \"Hyper+L\".\n\
 #   Window: left-half right-half top-half bottom-half maximize almost-maximize center left-third center-third right-third\n\
 #   left-two-thirds right-two-thirds top-left top-right bottom-left bottom-right next-display restore.\n\

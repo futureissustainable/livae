@@ -33,6 +33,8 @@ pub const BREAK_PAUSE_HOUR: u32 = 9;
 pub const BREAK_PAUSE_MORNING: u32 = 10;
 pub const BREAK_RESUME: u32 = 11;
 pub const YEAR: u32 = 12;
+pub const EQ_TOGGLE: u32 = 13;
+pub const EQ_EDIT: u32 = 14;
 
 thread_local! {
     static ICON: Cell<HICON> = const { Cell::new(HICON(std::ptr::null_mut())) };
@@ -143,6 +145,17 @@ pub fn menu(hwnd: HWND) -> u32 {
             sub(MF_STRING, BREAK_PAUSE_MORNING, "Pause until tomorrow");
             sub(MF_STRING, BREAK_RESUME, "Resume");
             let _ = AppendMenuW(m, MF_POPUP, breaks.0 as usize, w!("Breaks"));
+        }
+        // The equaliser: what it is doing, on or off, and where its profiles live (settings.toml, [sound]).
+        if let Ok(eq) = CreatePopupMenu() {
+            let sub = |flags: MENU_ITEM_FLAGS, id: u32, text: &str| {
+                let _ = AppendMenuW(eq, flags, id as usize, &HSTRING::from(text));
+            };
+            sub(MF_STRING | MF_GRAYED, 0, &crate::sound::status());
+            let _ = AppendMenuW(eq, MF_SEPARATOR, 0, PCWSTR::null());
+            sub(MF_STRING, EQ_TOGGLE, if s.sound.eq { "Turn off" } else { "Turn on" });
+            sub(MF_STRING, EQ_EDIT, "Edit profiles\u{2026}");
+            let _ = AppendMenuW(m, MF_POPUP, eq.0 as usize, w!("Equaliser"));
         }
         add(MF_STRING, SETTINGS, "Settings");
         let _ = AppendMenuW(m, MF_SEPARATOR, 0, PCWSTR::null());
