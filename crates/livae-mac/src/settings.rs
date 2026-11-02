@@ -23,7 +23,8 @@ use crate::glass::Glass;
 use livae_core::tokens;
 
 const W: f64 = 720.0;
-const H: f64 = 480.0;
+/// As tall as the fullest pane (General) and its bottom padding, no taller.
+const H: f64 = 400.0;
 const PAD: f64 = 24.0;
 const ROW: f64 = 44.0;
 /// A row with its help line under the label.
